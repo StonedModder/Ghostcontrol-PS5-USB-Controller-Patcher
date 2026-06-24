@@ -65,12 +65,12 @@ void xbox_parse_input(const uint8_t *b, ScePadData *o) {
     uint32_t btn = 0;
 
     /* b[4]: system + face buttons */
-    if (b4 & 0x04u) btn |= SCE_PAD_BUTTON_OPTIONS;  /* Menu (≡)  → Options  */
-    if (b4 & 0x08u) btn |= SCE_PAD_BUTTON_SHARE;    /* View (⧉)  → Share    */
-    if (b4 & 0x10u) btn |= SCE_PAD_BUTTON_CROSS;    /* A         → Cross    */
-    if (b4 & 0x20u) btn |= SCE_PAD_BUTTON_CIRCLE;   /* B         → Circle   */
-    if (b4 & 0x40u) btn |= SCE_PAD_BUTTON_SQUARE;   /* X         → Square   */
-    if (b4 & 0x80u) btn |= SCE_PAD_BUTTON_TRIANGLE; /* Y         → Triangle */
+    if (b4 & 0x04u) btn |= SCE_PAD_BUTTON_OPTIONS;      /* Menu (≡)  → Options  */
+    if (b4 & 0x08u) btn |= SCE_PAD_BUTTON_TOUCH_PAD;    /* View (⧉) → Touchpad */
+    if (b4 & 0x10u) btn |= SCE_PAD_BUTTON_CROSS;        /* A         → Cross    */
+    if (b4 & 0x20u) btn |= SCE_PAD_BUTTON_CIRCLE;       /* B         → Circle   */
+    if (b4 & 0x40u) btn |= SCE_PAD_BUTTON_SQUARE;       /* X         → Square   */
+    if (b4 & 0x80u) btn |= SCE_PAD_BUTTON_TRIANGLE;     /* Y         → Triangle */
 
     /* b[5]: dpad + bumpers + stick clicks */
     if (b5 & 0x01u) btn |= SCE_PAD_BUTTON_UP;
