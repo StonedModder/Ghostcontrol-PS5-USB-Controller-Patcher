@@ -8,7 +8,8 @@
 #define DEADZONE          7849
 
 int mamba_is_xinput_vidpid(uint16_t vid, uint16_t pid) {
-    return (vid == MAMBA_XINPUT_VID && pid == MAMBA_XINPUT_PID);
+    return (vid == MAMBA_XINPUT_VID && pid == MAMBA_XINPUT_PID) ||
+           (vid == GC8BITDO_2C_XINPUT_VID && pid == GC8BITDO_2C_XINPUT_PID);
 }
 
 int mamba_is_switch_vidpid(uint16_t vid, uint16_t pid) {
@@ -27,6 +28,8 @@ int mamba_is_xinput_interface(uint8_t subclass, uint8_t protocol) {
 const char *mamba_name(uint16_t vid, uint16_t pid) {
     if (vid == MAMBA_DONGLE_VID && pid == MAMBA_DONGLE_PID)
         return "Manba V2 NBJr receiver idle/update mode";
+    if (vid == GC8BITDO_2C_XINPUT_VID && pid == GC8BITDO_2C_XINPUT_PID)
+        return "8BitDo Ultimate 2C Wireless (XInput)";
     if (mamba_is_xinput_vidpid(vid, pid))
         return "Manba V2 NBJr PC/XInput mode";
     if (mamba_is_switch_vidpid(vid, pid))

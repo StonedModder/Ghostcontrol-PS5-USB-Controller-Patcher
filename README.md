@@ -41,6 +41,7 @@ https://github.com/user-attachments/assets/6583b1c2-3d3d-4f2e-9e79-689121fea4a3
 |-----------|------|---------|--------|
 | 8BitDo Ultimate 2 | Nintendo Switch Pro | 057e:2009 | ✅ Working |
 | 8BitDo Ultimate 2 | Native | 2dc8:310b | Untested |
+| 8BitDo Ultimate 2C Wireless (81HD) | XInput | 2dc8:310a | ✅ Working |
 
 See `othercontrollersGuide.md` for adding new controllers.
 

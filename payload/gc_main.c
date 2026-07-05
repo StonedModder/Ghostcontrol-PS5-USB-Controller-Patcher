@@ -812,6 +812,17 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
                 close(fd);
                 return 0;
             }
+            /* 8BitDo Ultimate 2C Wireless (XInput). Its interface signature is
+             * 0x5d/0x01 (same as Manba), so match it by VID/PID FIRST and keep
+             * the real pair — the generic Manba-interface branch below would
+             * normalize it to 045e/028e and then usb_hid_thread would open the
+             * wrong (Manba) endpoints. This device needs IN=0x84 / OUT=0x05. */
+            if (vid == GC8BITDO_2C_XINPUT_VID && pid == GC8BITDO_2C_XINPUT_PID) {
+                gp_log("scan: %s 8BitDo Ultimate 2C Wireless (XInput)\n", path);
+                *out_vid = vid; *out_pid = pid;
+                close(fd);
+                return 1;
+            }
             /* Xbox One/Series detection by GIP interface protocol (issue #2).
              * Catches ALL Xbox One/Series pads regardless of PID. Runs first so
              * a non-0x02ea Xbox normalizes to the canonical VID_XBOX/PID_XBOX
@@ -1065,35 +1076,47 @@ static void *usb_hid_thread(void *arg) {
             close(fd); goto exit_slot;
         }
 
-        memset(&fs_open,0,sizeof(fs_open));
-        fs_open.ep_index=0; fs_open.ep_no=MAMBA_XINPUT_EP_IN;
-        fs_open.max_bufsize=64; fs_open.max_frames=1;
-        if (ioctl(fd,USB_FS_OPEN,&fs_open)!=0){
-            gp_log("slot[%d] Mamba IN fail errno=%d\n",slot,errno);
+        /* Endpoint layout differs per device: classic Manba is IN=0x81/OUT=0x02,
+         * but the composite 8BitDo 2C uses IN=0x84/OUT=0x05 (real config
+         * descriptor). Try the device-specific endpoints first, then the other
+         * variant, so both work even across cable/dongle differences. */
+        int is_8bitdo = (vid == GC8BITDO_2C_XINPUT_VID && pid == GC8BITDO_2C_XINPUT_PID);
+        uint8_t in_cands[2]  = { is_8bitdo ? GC8BITDO_2C_XINPUT_EP_IN : MAMBA_XINPUT_EP_IN,
+                                 is_8bitdo ? MAMBA_XINPUT_EP_IN       : GC8BITDO_2C_XINPUT_EP_IN };
+        uint8_t out_cands[3] = { is_8bitdo ? GC8BITDO_2C_XINPUT_EP_OUT : MAMBA_XINPUT_EP_OUT,
+                                 MAMBA_XINPUT_EP_OUT_ALT,
+                                 is_8bitdo ? MAMBA_XINPUT_EP_OUT       : GC8BITDO_2C_XINPUT_EP_OUT };
+
+        int in_ok = 0;
+        for (int c = 0; c < 2 && !in_ok; c++) {
+            memset(&fs_open,0,sizeof(fs_open));
+            fs_open.ep_index=0; fs_open.ep_no=in_cands[c];
+            fs_open.max_bufsize=64; fs_open.max_frames=1;
+            if (ioctl(fd,USB_FS_OPEN,&fs_open)==0) {
+                in_ok = 1;
+                gp_log("slot[%d] XInput IN ep=0x%02x ok maxpkt=%u\n",
+                       slot, in_cands[c], (unsigned)fs_open.max_packet_length);
+            }
+        }
+        if (!in_ok) {
+            gp_log("slot[%d] XInput IN fail errno=%d\n",slot,errno);
             goto uninit_exit;
         }
-        gp_log("slot[%d] Mamba IN ep=0x%02x ok maxpkt=%u\n",
-               slot, MAMBA_XINPUT_EP_IN, (unsigned)fs_open.max_packet_length);
 
         buffers[0]=buf; lengths[0]=64;
         eps[0].ppBuffer=buffers; eps[0].pLength=lengths; eps[0].nFrames=1;
         eps[0].timeout=50; eps[0].flags=USB_FS_FLAG_SINGLE_SHORT_OK|USB_FS_FLAG_MULTI_SHORT_OK;
 
-        memset(&fs_open,0,sizeof(fs_open));
-        fs_open.ep_index=1; fs_open.ep_no=MAMBA_XINPUT_EP_OUT;
-        fs_open.max_bufsize=64; fs_open.max_frames=1;
-        out_opened = (ioctl(fd,USB_FS_OPEN,&fs_open)==0) ? 1 : 0;
-        if (!out_opened) {
+        for (int c = 0; c < 3 && !out_opened; c++) {
             memset(&fs_open,0,sizeof(fs_open));
-            fs_open.ep_index=1; fs_open.ep_no=MAMBA_XINPUT_EP_OUT_ALT;
+            fs_open.ep_index=1; fs_open.ep_no=out_cands[c];
             fs_open.max_bufsize=64; fs_open.max_frames=1;
-            out_opened = (ioctl(fd,USB_FS_OPEN,&fs_open)==0) ? 1 : 0;
-            if (out_opened) gp_log("slot[%d] Mamba OUT ep=0x%02x\n",
-                                   slot, MAMBA_XINPUT_EP_OUT_ALT);
-        } else {
-            gp_log("slot[%d] Mamba OUT ep=0x%02x\n", slot, MAMBA_XINPUT_EP_OUT);
+            if (ioctl(fd,USB_FS_OPEN,&fs_open)==0) {
+                out_opened = 1;
+                gp_log("slot[%d] XInput OUT ep=0x%02x\n", slot, out_cands[c]);
+            }
         }
-        gp_log("slot[%d] Mamba OUT opened=%d\n", slot, out_opened);
+        gp_log("slot[%d] XInput OUT opened=%d\n", slot, out_opened);
         if (out_opened) mamba_xinput_send_enable(fd, eps);
         goto main_loop;
     }

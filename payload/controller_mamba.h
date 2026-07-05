@@ -30,6 +30,18 @@
 #define MAMBA_SWITCH_VID        0x057eu
 #define MAMBA_SWITCH_PID        0x2009u
 
+/* 8BitDo Ultimate 2C Wireless (model 81HD), XInput mode.
+ * Speaks the exact same Xbox 360 XUSB wire protocol as the Manba PC mode
+ * (20-byte report id 0x00 len 0x14, enable [0x01,0x03,0x0e]) and the same
+ * XInput interface signature (class 0xff subclass 0x5d proto 0x01), so it
+ * reuses this XInput parser. It is a COMPOSITE device though, so its XInput
+ * interface endpoints are NOT the classic 0x81/0x01 — confirmed by reading the
+ * real USB config descriptor: IN=0x84, OUT=0x05 (mps 32). */
+#define GC8BITDO_2C_XINPUT_VID     0x2dc8u
+#define GC8BITDO_2C_XINPUT_PID     0x310au
+#define GC8BITDO_2C_XINPUT_EP_IN   0x84u
+#define GC8BITDO_2C_XINPUT_EP_OUT  0x05u
+
 #define MAMBA_XINPUT_EP_IN      0x81u
 #define MAMBA_XINPUT_EP_OUT     0x02u
 #define MAMBA_XINPUT_EP_OUT_ALT 0x01u
