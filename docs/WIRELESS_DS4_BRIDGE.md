@@ -14,8 +14,8 @@ same checked process-memory access rules, but it has a different data flow:
 1. Attach to `SceRemotePlay` and read the paired controller with
    `scePadReadState`.
 2. Copy each normalized `ScePadData` frame to a small loopback receiver.
-3. Find the current native game's `libScePad` imports and verify their actual
-   wrapper instructions before writing anything.
+3. Resolve the current native game's `libScePad` exports and verify the full
+   firmware-specific manifest before writing anything.
 4. Detour the five normal read entry points to a private snapshot of the DS4
    state. The original bytes and the page protections are saved for removal.
 5. Restore the game when it exits or when the bridge is stopped.
@@ -26,11 +26,17 @@ build is useful while debugging a title.
 
 ## Safety and firmware behavior
 
-The firmware-11.60 manifest is the only one currently verified on hardware.
-Unknown firmware is not patched just because a symbol resolves. The generic
-path requires all five wrappers, their internal jump targets, the executable
-`PT_LOAD` range, padding, and the controller-information prologue to agree.
-When any check fails, the payload writes a report and leaves the game alone.
+Firmware 11.60 (`0x11600005`) is the only version currently supported. It is
+matched by firmware value, export offsets, 256-byte function hashes, wrapper
+bytes, internal targets, controller-information prologue, and a unique type-0
+client-table entry. A label such as "11.xx" is not a compatibility guarantee:
+private `libScePad` code and data layouts can change in any system update.
+
+Every other firmware fails closed before the first game-process write. The
+wireless reader itself uses resolved public APIs in `SceRemotePlay`; it does not
+use firmware offsets. The payload still writes a bounded game fingerprint so
+another exact manifest can be reviewed and added later, and it never treats
+structural similarity as support.
 
 The report is saved under `/data/ds4tod5/` so a tester can send it without a
 shell session. It includes the firmware value, resolved offsets, bounded
@@ -47,6 +53,17 @@ make stop-wireless-ds4
 
 `wireless-ds4-auto` is the intended end-user payload. The other targets are
 diagnostic and cleanup helpers.
+
+## Current limits
+
+- Only firmware 11.60 has an accepted game manifest.
+- The bridge covers the five standard read/data entry points observed on the
+  tested titles. A title that uses another private pad path needs a separate,
+  reviewed hook.
+- DualSense-only output features such as adaptive-trigger effects are not
+  translated back to the DualShock 4.
+- A stopped session restores the patched entry points. Small injected
+  allocations remain in their target processes until those processes exit.
 
 ## Review notes
 

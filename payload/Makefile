@@ -27,18 +27,18 @@ $(TARGET): $(SRC)
 
 wireless-ds4: $(WIRELESS_BRIDGE_TARGET)
 
-$(WIRELESS_BRIDGE_TARGET): game_pad_bridge_main.c shellui_pad.c shellui_pad.h gc_types.h
-	$(CC) $(CFLAGS) -o $@ game_pad_bridge_main.c shellui_pad.c $(LDFLAGS)
+$(WIRELESS_BRIDGE_TARGET): game_pad_bridge_main.c wireless_ds4.c wireless_ds4.h gc_types.h
+	$(CC) $(CFLAGS) -o $@ game_pad_bridge_main.c wireless_ds4.c $(LDFLAGS)
 
 wireless-ds4-auto: $(WIRELESS_BRIDGE_AUTO_TARGET)
 
-$(WIRELESS_BRIDGE_AUTO_TARGET): game_pad_bridge_main.c shellui_pad.c shellui_pad.h gc_types.h
-	$(CC) $(CFLAGS) -DGC_WIRELESS_DS4_AUTO_WATCH=1 -o $@ game_pad_bridge_main.c shellui_pad.c $(LDFLAGS)
+$(WIRELESS_BRIDGE_AUTO_TARGET): game_pad_bridge_main.c wireless_ds4.c wireless_ds4.h gc_types.h
+	$(CC) $(CFLAGS) -DGC_WIRELESS_DS4_AUTO_WATCH=1 -o $@ game_pad_bridge_main.c wireless_ds4.c $(LDFLAGS)
 
 wireless-ds4-status: $(WIRELESS_STATUS_TARGET)
 
-$(WIRELESS_STATUS_TARGET): game_pad_bridge_status_main.c shellui_pad.c shellui_pad.h gc_types.h
-	$(CC) $(CFLAGS) -o $@ game_pad_bridge_status_main.c shellui_pad.c $(LDFLAGS)
+$(WIRELESS_STATUS_TARGET): game_pad_bridge_status_main.c wireless_ds4.c wireless_ds4.h gc_types.h
+	$(CC) $(CFLAGS) -o $@ game_pad_bridge_status_main.c wireless_ds4.c $(LDFLAGS)
 
 stop-wireless-ds4: $(WIRELESS_STOP_TARGET)
 

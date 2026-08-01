@@ -11,7 +11,6 @@
  */
 #pragma once
 #include <stdint.h>
-#include <sys/types.h>
 
 /* Persistent status log exported by main.c. It mirrors critical logs to
  * /data/ghostpad/ghostpad_status.log so diagnostics survive when /dev/klog
@@ -78,7 +77,6 @@ int shellui_pad_inject(int32_t userId, int force_virtual_vda,
  */
 int shellui_pad_update(pid_t shellui_pid, intptr_t args_kaddr,
                        const void *pad_data, uint32_t pad_data_len);
-int shellui_pad_stop(pid_t shellui_pid, intptr_t args_kaddr);
 
 int shellui_pad_direct_usable(pid_t shellui_pid, intptr_t args_kaddr);
 int shellui_pad_direct_mode(pid_t shellui_pid, intptr_t args_kaddr);
@@ -126,85 +124,6 @@ int shellui_pad_user_has_handle(int32_t userId, int32_t observedHandle);
 int shellui_pad_test_vdi_cross(int32_t pad_handle);
 int shellcore_pad_test_vdi_cross(int32_t pad_handle);
 int shellcore_pad_test_vdi_neutral(int32_t pad_handle); /* buttons=0, no UI input */
-
-/* Read-only physical-pad diagnostic.
- *
- * PT_ATTACHes SceRemotePlay, opens the foreground user's type-0 physical pad,
- * samples scePadReadState(), and logs normalized ScePadData fields.  This does
- * not create, bind, disconnect, or inject a virtual device.
- *
- * Returns the number of successful samples, or -1 when the reader could not be
- * initialized.  interval_us is clamped to a conservative diagnostic range.
- */
-int shellui_pad_remote_probe(int32_t userId, unsigned samples,
-                             unsigned interval_us);
-
-/* Restart only the supervised SceRemotePlay daemon to clear a poisoned
- * libScePad client after an interrupted diagnostic call. */
-int shellui_pad_remote_reset(void);
-
-/* Start a persistent 120 Hz physical-pad reader in SceRemotePlay. The target
- * thread writes normalized ScePadData into shared target memory; callers read
- * it with shellui_pad_remote_reader_read() without per-frame ptrace stops. */
-int shellui_pad_remote_reader_start(int32_t userId, pid_t *out_pid,
-                                    intptr_t *out_args_kaddr);
-int shellui_pad_remote_reader_read(pid_t pid, intptr_t args_kaddr,
-                                   void *pad_data, uint32_t pad_data_len,
-                                   uint32_t *out_seq);
-int shellui_pad_remote_reader_stop(pid_t pid, intptr_t args_kaddr);
-
-/*
- * Reboot-free wireless DS4 bridge for one exact native-game process.
- * The installer verifies the firmware-11.60 libScePad read-family manifest,
- * selects the unique type-0 user handle, detours that game's five normal pad
- * readers into an in-process ScePadData snapshot, and detours that process's
- * manifest-verified controller-information export through a preserved
- * prologue trampoline for admission. No virtual device is created and the
- * Bluetooth controller remains paired normally; game import order is irrelevant.
- */
-int shellui_pad_game_bridge_install(int32_t user_id, pid_t *out_game_pid,
-                                    intptr_t *out_args_kaddr);
-int shellui_pad_game_bridge_update(pid_t game_pid, intptr_t args_kaddr,
-                                   const void *pad_data,
-                                   uint32_t pad_data_len);
-typedef struct {
-    uint32_t active;
-    uint32_t seq;
-    int32_t pad_handle;
-    int32_t receiver_ready;
-    int32_t receiver_last_result;
-    uint32_t receiver_port;
-    uint64_t receiver_packets;
-    uint64_t read_state_calls;
-    uint64_t read_state_ext_calls;
-    uint64_t read_calls;
-    uint64_t read_ext_calls;
-    uint64_t data_internal_calls;
-    uint64_t controller_info_calls;
-    uint64_t controller_info_spoofs;
-    uint32_t buttons;
-    uint8_t connected;
-} Ds4tod5GameBridgeStatus;
-int shellui_pad_game_bridge_status(pid_t game_pid, intptr_t args_kaddr,
-                                   Ds4tod5GameBridgeStatus *out_status);
-int shellui_pad_game_bridge_remove(pid_t game_pid,
-                                   intptr_t args_kaddr);
-
-/* Read-only reconstruction of controller-related modules mapped into Sony
- * system processes. No target code or data is modified. */
-int shellui_pad_dump_remote_modules(void);
-int shellui_pad_dump_controller_policy_modules(void);
-int shellui_pad_dump_native_pad_symbols(void);
-int shellui_pad_dump_game_pad_imports(void);
-
-#define DS4TOD5_NATIVE_COMPAT_DISCOVER 0
-#define DS4TOD5_NATIVE_COMPAT_HANDLE_PROBE 1
-#define DS4TOD5_NATIVE_COMPAT_ENABLE 2
-#define DS4TOD5_NATIVE_COMPAT_DISABLE 3
-
-int shellui_pad_native_ps4_compat(const char *target_name, int32_t user_id,
-                                  int action);
-size_t shellui_pad_process_count(const char *process_name);
 
 /* PT_ATTACH SceShellCore and call VDA(userId, type=3) via pt_call after
  * assignment.  Returns VDA return value; if >= 0 it is the VDI write handle. */

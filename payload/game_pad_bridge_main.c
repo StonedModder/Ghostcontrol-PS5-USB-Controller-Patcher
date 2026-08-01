@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -17,19 +18,19 @@
 #include <ps5/payload.h>
 
 #include "gc_types.h"
-#include "shellui_pad.h"
+#include "wireless_ds4.h"
 
 #define GAME_BRIDGE_STOP_FILE "/data/ds4tod5/stop-game-pad-bridge"
 #define GAME_BRIDGE_LOG_FILE  "/data/ds4tod5/game-pad-bridge.log"
 #define GAME_BRIDGE_LOCK_FILE "/data/ds4tod5/game-pad-bridge-supervisor.lock"
 #define GAME_BRIDGE_STATE_FILE "/data/ds4tod5/game-pad-bridge-supervisor.txt"
-#define GAME_BRIDGE_LOCK_FRESH_SECONDS 20
 
 #ifndef GC_WIRELESS_DS4_AUTO_WATCH
 #define GC_WIRELESS_DS4_AUTO_WATCH 0
 #endif
 
 static time_t g_last_supervisor_write;
+static int g_supervisor_lock_fd = -1;
 
 static int
 process_alive(pid_t pid)
@@ -73,13 +74,12 @@ write_supervisor_state(const char *state, pid_t game_pid,
     int lock_length = snprintf(
         lock, sizeof(lock), "pid=%d\nheartbeat_epoch=%lld\n",
         getpid(), (long long)now);
-    int lock_fd = open(
-        GAME_BRIDGE_LOCK_FILE,
-        O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (lock_fd >= 0) {
+    if (g_supervisor_lock_fd >= 0) {
+        (void)ftruncate(g_supervisor_lock_fd, 0);
+        (void)lseek(g_supervisor_lock_fd, 0, SEEK_SET);
         if (lock_length > 0)
-            (void)write(lock_fd, lock, (size_t)lock_length);
-        close(lock_fd);
+            (void)write(
+                g_supervisor_lock_fd, lock, (size_t)lock_length);
     }
     g_last_supervisor_write = now;
 }
@@ -87,41 +87,19 @@ write_supervisor_state(const char *state, pid_t game_pid,
 static int
 acquire_supervisor_lock(void)
 {
-    char lock[128];
-    pid_t existing_pid = -1;
-    long long heartbeat = 0;
-    int fd = open(GAME_BRIDGE_LOCK_FILE, O_RDONLY);
-    if (fd >= 0) {
-        ssize_t length = read(fd, lock, sizeof(lock) - 1u);
-        close(fd);
-        if (length > 0) {
-            lock[length] = '\0';
-            (void)sscanf(
-                lock, "pid=%d\nheartbeat_epoch=%lld",
-                &existing_pid, &heartbeat);
-        }
-    }
-
-    time_t now = time(NULL);
-    if (existing_pid > 0 && heartbeat > 0 &&
-        now >= (time_t)heartbeat &&
-        now - (time_t)heartbeat <= GAME_BRIDGE_LOCK_FRESH_SECONDS &&
-        process_alive(existing_pid))
-        return 0;
-
-    fd = open(
+    int fd = open(
         GAME_BRIDGE_LOCK_FILE,
-        O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        O_RDWR | O_CREAT, 0600);
     if (fd < 0)
         return -1;
-    int length = snprintf(
-        lock, sizeof(lock), "pid=%d\nheartbeat_epoch=%lld\n",
-        getpid(), (long long)now);
-    int write_result = length > 0
-        ? (int)write(fd, lock, (size_t)length)
-        : -1;
-    close(fd);
-    return write_result == length ? 1 : -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int lock_errno = errno;
+        close(fd);
+        return lock_errno == EWOULDBLOCK || lock_errno == EAGAIN
+            ? 0 : -1;
+    }
+    g_supervisor_lock_fd = fd;
+    return 1;
 }
 
 extern int32_t sceUserServiceInitialize(void *params);
@@ -217,12 +195,12 @@ run_game_session(pid_t reader_pid, intptr_t reader_args,
         ScePadData pad;
         uint32_t seq = 0;
         memset(&pad, 0, sizeof(pad));
-        if (shellui_pad_remote_reader_read(
+        if (wireless_ds4_remote_reader_read(
                 reader_pid, reader_args, &pad, sizeof(pad), &seq) == 0) {
             consecutive_read_failures = 0;
             if (seq != last_seq) {
                 input_frames++;
-                if (shellui_pad_game_bridge_update(
+                if (wireless_ds4_game_bridge_update(
                         game_pid, bridge_args,
                         &pad, sizeof(pad)) == 0) {
                     output_frames++;
@@ -260,7 +238,7 @@ run_game_session(pid_t reader_pid, intptr_t reader_args,
             game_alive = kill(game_pid, 0) == 0 || errno == EPERM;
             Ds4tod5GameBridgeStatus receiver_status;
             memset(&receiver_status, 0, sizeof(receiver_status));
-            if (shellui_pad_game_bridge_status(
+            if (wireless_ds4_game_bridge_status(
                     game_pid, bridge_args, &receiver_status) == 0 &&
                 receiver_status.receiver_ready == 1) {
                 consecutive_receiver_health_failures = 0;
@@ -293,7 +271,7 @@ run_game_session(pid_t reader_pid, intptr_t reader_args,
         usleep(8333);
     }
     int remove_result =
-        shellui_pad_game_bridge_remove(game_pid, bridge_args);
+        wireless_ds4_game_bridge_remove(game_pid, bridge_args);
     ghostpad_status_log(
         "[DS4toDS5] game bridge remove=%d pid=%d\n",
         remove_result, game_pid);
@@ -311,11 +289,11 @@ wait_for_game_receiver(pid_t game_pid, intptr_t bridge_args)
     for (unsigned attempt = 0; attempt < 200; ++attempt) {
         Ds4tod5GameBridgeStatus status;
         memset(&status, 0, sizeof(status));
-        if (shellui_pad_game_bridge_status(
+        if (wireless_ds4_game_bridge_status(
                 game_pid, bridge_args, &status) == 0) {
             if (status.receiver_ready == 1)
                 return 0;
-            if (status.receiver_ready == 2)
+            if (status.receiver_ready == 2 || status.receiver_ready < 0)
                 return -1;
         }
         usleep(10000);
@@ -342,7 +320,7 @@ start_wireless_reader(int32_t user_id, pid_t *reader_pid,
                       unsigned long long output_frames)
 {
     for (;;) {
-        if (shellui_pad_remote_reader_start(
+        if (wireless_ds4_remote_reader_start(
                 user_id, reader_pid, reader_args) == 0)
             return 0;
         if (!GC_WIRELESS_DS4_AUTO_WATCH ||
@@ -420,7 +398,7 @@ main(void)
 
         pid_t game_pid = -1;
         intptr_t bridge_args = 0;
-        int install_result = shellui_pad_game_bridge_install(
+        int install_result = wireless_ds4_game_bridge_install(
             user_id, &game_pid, &bridge_args);
         if ((install_result == -2 || install_result == -3) &&
             GC_WIRELESS_DS4_AUTO_WATCH) {
@@ -474,7 +452,7 @@ main(void)
             ghostpad_status_log(
                 "[DS4toDS5] game receiver did not become ready pid=%d\n",
                 game_pid);
-            (void)shellui_pad_game_bridge_remove(game_pid, bridge_args);
+            (void)wireless_ds4_game_bridge_remove(game_pid, bridge_args);
             if (GC_WIRELESS_DS4_AUTO_WATCH &&
                 process_alive(game_pid)) {
                 if (retry_pid != game_pid) {
@@ -531,7 +509,7 @@ main(void)
         if (end_reason == SESSION_END_READER_FAILED &&
             process_alive(game_pid)) {
             int reader_stop = process_alive(reader_pid)
-                ? shellui_pad_remote_reader_stop(reader_pid, reader_args)
+                ? wireless_ds4_remote_reader_stop(reader_pid, reader_args)
                 : 0;
             ghostpad_status_log(
                 "[DS4toDS5] wireless reader recovery stop=%d\n",
@@ -560,7 +538,7 @@ main(void)
 cleanup:
     if (reader_pid >= 0 && reader_args != 0) {
         int reader_stop =
-            shellui_pad_remote_reader_stop(reader_pid, reader_args);
+            wireless_ds4_remote_reader_stop(reader_pid, reader_args);
         ghostpad_status_log(
             "[DS4toDS5] wireless reader stop=%d\n", reader_stop);
     }
@@ -568,7 +546,11 @@ cleanup:
     write_supervisor_state(
         "stopped", -1, sessions, total_output_frames, 1);
     game_bridge_notify("Ghostcontrol: wireless DS4 bridge stopped");
-    (void)unlink(GAME_BRIDGE_LOCK_FILE);
+    if (g_supervisor_lock_fd >= 0) {
+        (void)flock(g_supervisor_lock_fd, LOCK_UN);
+        close(g_supervisor_lock_fd);
+        g_supervisor_lock_fd = -1;
+    }
     ghostpad_status_log(
         "[DS4toDS5] game bridge exit=%d sessions=%u total_out=%llu\n",
         exit_code, sessions, total_output_frames);

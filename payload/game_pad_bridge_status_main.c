@@ -14,7 +14,7 @@
 #include <ps5/klog.h>
 #include <ps5/payload.h>
 
-#include "shellui_pad.h"
+#include "wireless_ds4.h"
 
 #define BRIDGE_INSTALL_REPORT "/data/ds4tod5/game-pad-bridge-last.txt"
 #define BRIDGE_STATUS_REPORT  "/data/ds4tod5/game-pad-bridge-status.txt"
@@ -77,7 +77,7 @@ main(void)
     int identity_result =
         read_install_identity(&game_pid, &args_address);
     int snapshot_result = identity_result == 0
-        ? shellui_pad_game_bridge_status(
+        ? wireless_ds4_game_bridge_status(
               game_pid, args_address, &status)
         : -1;
 
