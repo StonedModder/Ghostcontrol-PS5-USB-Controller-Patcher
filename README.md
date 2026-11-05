@@ -1,8 +1,6 @@
 # Ghostcontrol
 
 <p align="center">
-  <img src="media/brand/logo.png" alt="Ghostcontrol" width="140" />
-  &nbsp;&nbsp;
   <img src="media/brand/icon0.png" alt="App icon" width="140" />
 </p>
 
