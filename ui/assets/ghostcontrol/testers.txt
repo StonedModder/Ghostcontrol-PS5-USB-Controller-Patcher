@@ -1,0 +1,13 @@
+# Ghostcontrol Toolbox - testers
+#
+# One name per line. Lines starting with # are comments and blank lines are
+# kept as spacing, so you can group names however you like.
+#
+# This file is read at run time from /app0/assets/ghostcontrol/testers.txt, so
+# adding a name needs no code change: edit here, then `make deploy`.
+# Indent a line with two spaces to have it drawn quieter, for a note under a
+# name.
+
+SeregonWar
+NathanDrake
+NSTG

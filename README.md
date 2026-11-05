@@ -1,51 +1,81 @@
-# Ghostcontrol — by StonedModder
+# Ghostcontrol
 
-If you enjoy my work - please consider donating to my BTC address: 
+<p align="center">
+  <img src="media/brand/logo.png" alt="Ghostcontrol" width="160" />
+</p>
 
-`bc1qa9zfgnccajsw8vg7k287qz5a7apf8pefj5jjx5`
+**Ghostcontrol** lets you use third-party USB and Bluetooth controllers on a jailbroken PS5. A resident controller service owns the hardware; a native home-screen app — **Ghostcontrol Toolbox** — is the GUI. Nothing here patches ShellUI, decrypts system bundles, or depends on firmware offset tables.
 
+| | |
+|---|---|
+| Current beta | **2.2.2** — native Toolbox title (PPSA62838 lineage) |
+| Layout | `core/` service · `ui/` homebrew app · `GhosttoothAPI/` companion ELF |
+| Private dev tree | [`ghostcontrol-toolbox-2.0`](https://github.com/StonedModder/ghostcontrol-toolbox-2.0) (this repo is the clean product mirror) |
 
-Use third-party USB controllers on PS5. Reads USB HID input from a plugged-in controller and injects it into a virtual DualSense via the PS5's `scePadVirtualDeviceInsertData` path (Ghostpad VDI path).
-
-**Tested controller:** 8BitDo Ultimate 2 in Nintendo Switch Pro Controller mode (VID=0x057e PID=0x2009)
+<p align="center">
+  <img src="media/screenshots/01-controllers.png" alt="Controllers" width="720" />
+</p>
 
 ---
 
-
-
-https://github.com/user-attachments/assets/6583b1c2-3d3d-4f2e-9e79-689121fea4a3
-
-
-
 ## Features
 
-- 60Hz input streaming from USB HID controller → virtual DualSense
-- PS5 notifications: startup, controller connect/disconnect, detected controller type
-- User assignment: virtual DualSense is bound to the foreground user on startup
-- Full button mapping: face buttons, triggers, sticks, dpad, L3/R3, PS button
-- Auto-reconnect on controller unplug/replug
+| Area | What you get |
+|---|---|
+| **Controllers & USB** | Third-party USB pads → virtual DualSense, XInput/DInput, per-device rules, slot assignment |
+| **Profiles** | Create / edit / rename / import / export mapping profiles |
+| **Guided setup** | Learn an unknown pad control-by-control with live capture |
+| **Lights & rumble** | DualSense lightbar FX (solid, breathe, rainbow, strobe…) and motor test |
+| **Bluetooth** | Classic + LE gamepads, pair / forget / retry |
+| **Service** | Start / stop / restart companion, autostart, diagnostics, log tail |
+| **GhostPad** | Optional network pad input for remote / ESP bridges |
+| **About** | Credits, support links, QR codes |
+
+Full source inventory: [`FEATURES.md`](FEATURES.md). User guides: [`docs/wiki/`](docs/wiki/).
+
+<p align="center">
+  <img src="media/screenshots/02-profiles.png" width="340" alt="Profiles" />
+  <img src="media/screenshots/03-guided-setup.png" width="340" alt="Guided setup" />
+</p>
+<p align="center">
+  <img src="media/screenshots/04-lights-rumble.png" width="340" alt="Lights and rumble" />
+  <img src="media/screenshots/05-service.png" width="340" alt="Service" />
+</p>
+
+---
+
+## How it works
+
+```
+USB / BT controller ──► GhosttoothAPI (resident service, ELF loader :9021)
+                              │  GC1 IPC (local only)
+                              ▼
+                    Ghostcontrol Toolbox (native title under /data/homebrew)
+```
+
+1. Load **GhosttoothAPI.elf** on the ELF loader (port **9021**).
+2. Install and open the **Ghostcontrol Toolbox** home-screen title.
+3. Start the service from the **Service** page if it is not already running.
+4. Plug in your controller, assign the virtual DualSense when the PS5 asks, and play.
+
+The app never injects into ShellUI. It is a normal homebrew title with ordinary pad, user-service, and network APIs. IPC is local-only (loopback / console address).
+
+<p align="center">
+  <img src="media/screenshots/06-beta-disclaimer.png" alt="Beta disclaimer on launch" width="720" />
+</p>
+
+*Beta builds show a one-time launch notice; **Don’t show again** saves the preference.*
 
 ---
 
 ## Requirements
 
-- PS5 with kernel exploit (tested on jailbroken PS5)
+- Jailbroken PS5 with an ELF loader (tested through current 13.x beta line)
 - [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk)
-- USB controller — see supported list below
+- UI kit + native deps fetched by `tools/fetch-deps.sh` (pinned in `tools/deps.lock`)
+- A DualSense (or another pad the Toolbox can drive) for the menus while you configure a custom controller
 
----
-
-## Supported Controllers
-
-**Full matrix:** [Supported_controllers.md](Supported_controllers.md) — detection rules, endpoints, ignored devices, and Manba vs 8BitDo notes.
-
-| Controller | Mode | VID:PID | Status |
-|-----------|------|---------|--------|
-| 8BitDo Ultimate 2 | Nintendo Switch Pro | 057e:2009 | ✅ Working |
-| 8BitDo Ultimate 2 | Native | 2dc8:310b | Untested |
-| 8BitDo Ultimate 2C Wireless (81HD) | XInput | 2dc8:310a | ✅ Working |
-
-See [othercontrollersGuide.md](othercontrollersGuide.md) for adding new controllers.
+Supported USB matrix (1.x baseline, still useful): [`Supported_controllers.md`](Supported_controllers.md). Adding devices: [`othercontrollersGuide.md`](othercontrollersGuide.md).
 
 ---
 
@@ -53,53 +83,80 @@ See [othercontrollersGuide.md](othercontrollersGuide.md) for adding new controll
 
 ```sh
 export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
-make clean all
+
+# Companion service (load this on :9021)
+make -C GhosttoothAPI
+
+# Native Toolbox title (packages the companion into the app assets)
+make -C ui deps
+make -C ui app \
+  GHOSTTOOTH_ELF="$PWD/GhosttoothAPI/GhosttoothAPI.elf" \
+  GHOSTTOOTH_NOTICES="docs/release-notices/ps5-homebrew-ui-NOTICES.md"
 ```
 
-Output: `ghost-control-ps5.elf`
+Outputs:
 
-## Deploy
+- `GhosttoothAPI/GhosttoothAPI.elf` — resident companion
+- `ui` build root / dist title folder + ZIP (kit-generated under the configured `GC_BUILD_ROOT`)
 
-```sh
-# Deploy to PS5 (replace IP)
-nc -w 5 192.168.1.xxx 9021 < ghost-control-ps5.elf
-```
-
-Or set `PS5_HOST` in your environment:
-```sh
-make deploy PS5_HOST=192.168.1.xxx
-```
+Deploy helpers: `tools/deploy-app.py`, `tools/deploy-core.py`. Set `PS5_HOST` to your console.
 
 ---
 
-## How It Works
+## Repository layout
 
-1. **VDA**: Creates a virtual DualSense via `scePadVirtualDeviceAddDevice(type=3)`
-2. **klog capture**: Monitors klogsrv TCP to detect the `DEVICE_ADDED` event and get the device handle
-3. **force_bind**: Binds the virtual device to the foreground user via ShellUI MBus IPC
-4. **USB HID thread**: Detaches `usb_hid0` from the controller, opens raw USB FS endpoints, runs the Nintendo Switch Pro Controller USB handshake, then reads 60Hz input reports
-5. **VDI inject**: Parses HID reports into `ScePadData` and calls `scePadVirtualDeviceInsertData` at 60Hz
+```
+core/            Controller service sources (USB, BT, profiles, IPC, FX, …)
+ui/              Native Toolbox app (screens, assets, sce_sys art)
+GhosttoothAPI/   Companion ELF build (links core/src)
+tools/           Fetch deps, compose kit, title id, deploy, XMB art
+docs/wiki/       End-user guides
+docs/            Architecture notes used by the product
+media/           README brand art + console screenshots
+FEATURES.md      Capability → source map
+```
 
-See `ProControllerResearch.md` for the full research documentation on the USB HID protocol.
+This tree is the **clean product source**. Development noise (host test suites, audit dumps, session progress logs, wire scripts) lives only in the private toolbox workspace and is not mirrored here.
 
 ---
 
-## Files
+## From 1.x
 
-| File | Description |
-|------|-------------|
-| `gc_main.c` | Main payload — VDA, VDI, USB HID thread, button parsing |
-| `shellui_pad.c` | ShellUI PT_ATTACH helper for force_bind via MBus |
-| `shellui_pad.h` | Header for shellui_pad |
-| `Makefile` | Build system |
-| `ghost-control-ps5.elf` | Pre-compiled payload (deploy directly) |
-| `ProControllerResearch.md` | Full USB protocol research for Nintendo Switch Pro Controller |
-| `Supported_controllers.md` | Compatibility matrix (source of truth) |
-| `CHANGELOG.md` | Release history |
-| `othercontrollersGuide.md` | Guide for adding other USB HID controllers |
+Earlier releases in this repository were the single-payload USB→VDI line (`ghost-control-ps5.elf` / `payload/`). That approach is superseded by the 2.0 native app + companion design:
+
+- No ShellUI module injection
+- No HomeUI / Settings bundle patching
+- No per-firmware offset tables
+- Home-screen title + local GC1 IPC instead of an XMB overlay
+
+Historical research notes such as `ProControllerResearch.md` remain under `docs/` where still useful.
+
+---
+
+## Docs
+
+| Doc | Topic |
+|---|---|
+| [Getting Started](docs/wiki/Getting-Started.md) | Install, launch, first controller |
+| [Guided Controller Setup](docs/wiki/Guided-Controller-Setup.md) | Learn a new pad |
+| [Profile Sharing](docs/wiki/Profile-Sharing-and-Import.md) | Import / export INI profiles |
+| [DualSense Tools](docs/wiki/DualSense-Tools.md) | Lightbar, rumble, motion |
+| [Toolbox Reference](docs/wiki/Toolbox-Reference.md) | Every page |
+| [Troubleshooting](docs/wiki/Troubleshooting-and-Logs.md) | Logs and recovery |
+| [GhostPad API](docs/GHOSTPAD-API.md) | Network pad protocol |
+
+---
+
+## Support
+
+If Ghostcontrol helps you, donations are appreciated:
+
+`bc1qa9zfgnccajsw8vg7k287qz5a7apf8pefj5jjx5`
 
 ---
 
 ## License
 
-GPL-3.0-or-later
+GPL-3.0-or-later for Ghostcontrol project sources unless a file says otherwise.
+
+Third-party terms: fonts under `ui/assets/fonts/*-LICENSE.txt`, UI kit and SDK notices under `docs/release-notices/`. Preserve SPDX headers and dependency licenses; this README is not a relicense.

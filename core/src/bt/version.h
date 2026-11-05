@@ -1,0 +1,6 @@
+#ifndef GHOSTTOOTH_VERSION_H
+#define GHOSTTOOTH_VERSION_H
+
+#define GHOSTTOOTH_VERSION "2.0.0-alpha.1"
+
+#endif

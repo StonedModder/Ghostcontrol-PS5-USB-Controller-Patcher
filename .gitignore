@@ -1,2 +1,24 @@
+# Upstream clones; fetched by tools/fetch-deps.sh and pinned in tools/deps.lock
+ui/vendor/
+ui/kit-reference/
+
+# Build output
+core/out/
+core/.build/
+core/src/**/*.o
+ui/.build/
+ui/dist/
+.build/
+__pycache__/
+*.o
 *.elf
-payload/ghost-control-manba-v2-nbjr.elf
+
+# Per-build identity
+ui/.title-id
+.commandcode
+
+# Local / OS
+.DS_Store
+*.log
+*.bak
+media/raw/
