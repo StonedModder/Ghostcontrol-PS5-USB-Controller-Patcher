@@ -48,6 +48,7 @@
 #include "gc_ipc.h"
 #include "gc_notify.h"
 #include "gc_update.h"
+#include "gc_product_version.h"
 #include "gc_ds4_bridge.h"
 #include "gc_usb.h"
 #include "gc_setup.h"
@@ -86,7 +87,7 @@
  * 33-character /user/data/ghostcontrol/icon0.png spelling. Publish the same
  * bytes under both names so source-bundle and bytecode tiles both resolve. */
 #define XMB_ICON_ALIAS_PATH GC_DATA_ROOT "/icon0.png"
-#define GC_VERSION "1.0.6-test.70"
+#define GC_VERSION GC_PRODUCT_VERSION
 #define LOG_MAX 1024
 
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -3426,7 +3427,7 @@ static int ipc_update_download(char *response, size_t response_size)
     char tag[GC_UPDATE_TAG_MAX * 2 + 1];
     (void)gc_ipc_hex_encode(info.tag, strlen(info.tag), tag, sizeof(tag));
     snprintf(response, response_size,
-             "{\"ok\":true,\"downloaded\":true,\"tag_encoding\":\"hex\",\"tag\":\"%s\",\"path\":\"/data/ghostcontrol/updates/Ghostcontrol.elf\"}\n",
+             "{\"ok\":true,\"downloaded\":true,\"tag_encoding\":\"hex\",\"tag\":\"%s\",\"path\":\"/data/ghostcontrol/updates/Ghostcontrol-Toolbox-app.zip\"}\n",
              tag);
     gc_state_note(g_state, "Verified Ghostcontrol update downloaded and staged");
     return 0;

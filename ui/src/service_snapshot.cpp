@@ -269,7 +269,8 @@ std::string command_result(const std::string &name, const std::string &argument,
         return "Profile saved. Controller output is unchanged.";
     }
     else if (!json_field_is_true(response, "applied") &&
-             name != "UPDATE_CHECK" && name != "UPDATE_DOWNLOAD" && name != "DEVICES")
+             name != "UPDATE_CHECK" && name != "UPDATE_DOWNLOAD" && name != "DEVICES" &&
+             name != "UPDATE_INSTALL" && name != "UPDATE_ROLLBACK")
     {
         return name == "DUALSENSE_RUMBLE" ? "Rumble request accepted. Effect not confirmed." :
                name == "DUALSENSE_RUMBLE_STOP" ? "Stop request accepted. Rumble stop not confirmed." :
@@ -294,9 +295,13 @@ std::string command_result(const std::string &name, const std::string &argument,
                      : "No newer release available";
     else if (name == "UPDATE_DOWNLOAD")
         result = json_field_is_true(response, "downloaded")
-                     ? "Update saved to /data/ghostcontrol/updates/Ghostcontrol.elf"
+                     ? "Update saved to /data/ghostcontrol/updates/Ghostcontrol-Toolbox-app.zip"
                      : "No newer release available";
     else if (name == "UPDATE_ROLLBACK") result = "Previous download restored";
+    else if (name == "UPDATE_INSTALL")
+        result = json_field_is_true(response, "staged")
+                     ? "Update staged. Close the app to finish installing."
+                     : "No newer release available";
     else if (name == "PROFILE_CREATE") result = "Profile created: " + argument;
     else if (name == "PROFILE_IMPORT") result = "Profile imported: " + argument;
     else if (name == "PROFILE_EXPORT") result = "Profile exported to /data/ghostcontrol/exports";

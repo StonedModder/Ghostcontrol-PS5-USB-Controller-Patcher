@@ -7,9 +7,9 @@
   "attribute": 0,
   "attribute2": 0,
   "attribute3": 0,
-  "conceptId": "77749",
+  "conceptId": "62838",
   "contentBadgeType": 2,
-  "contentId": "UP9000-PPSA77749_00-GHOSTCONTROLTOOL",
+  "contentId": "UP9000-PPSA62838_00-GHOSTCONTROLTOOL",
   "contentVersion": "01.000.000",
   "downloadDataSize": 256,
   "localizedParameters": {
@@ -26,6 +26,6 @@
   },
   "requiredSystemSoftwareVersion": "0x0000000000000000",
   "sdkVersion": "0x0000000000000000",
-  "titleId": "PPSA77749",
+  "titleId": "PPSA62838",
   "versionFileUri": ""
 }

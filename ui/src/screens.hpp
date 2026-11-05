@@ -65,6 +65,7 @@ enum class LiveSource
     runtime_ghostpad,   // RUNTIME_GET "ghostpad_enabled" (+ "listening")
     runtime_wireless,   // RUNTIME_GET "wireless_ds4"
     runtime_fx_enabled, // DUALSENSE_FX_STATUS "enabled"
+    runtime_include_prereleases, // RUNTIME_GET "include_prereleases"
     fx_color,           // saved base r/g/b, never inferred animation output
     fx_period_ms,       // DUALSENSE_FX_STATUS "period_ms", as "N ms"
     motion_state,       // DUALSENSE_FX_STATUS "motion_valid": live / idle
@@ -81,6 +82,7 @@ enum class LiveSource
     rt_toggle_ghostpad,    // RUNTIME_SET "ghostpad_enabled=<opposite>"
     rt_toggle_wireless,    // RUNTIME_SET "wireless_ds4=<opposite>"
     rt_toggle_fx,          // RUNTIME_SET "dualsense_fx_enabled=<opposite>"
+    rt_toggle_include_prereleases, // RUNTIME_SET "include_prereleases=<opposite>"
     setup_begin_first_pad, // SETUP_BEGIN hex(path|vid|pid|pad-vid-pid|identity)
     native_pad_available, // owning app's observed connection; not console-wide inventory
     native_light_result,  // actual app output API rc, never an IPC acknowledgement

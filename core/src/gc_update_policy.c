@@ -56,21 +56,37 @@ int gc_update_version_compare(const char *left, const char *right,
             return 0;
         }
     }
+    /* Same x.y.z: a final release outranks a prerelease of that version. */
     *comparison = right_pre - left_pre;
     return 0;
+}
+
+int gc_update_is_app_zip(const char *name)
+{
+    if (!name)
+        return 0;
+    size_t length = strlen(name);
+    size_t prefix = sizeof(GC_UPDATE_ZIP_PREFIX) - 1;
+    size_t suffix = sizeof(GC_UPDATE_ZIP_SUFFIX) - 1;
+    if (length < prefix + suffix || length >= GC_UPDATE_ASSET_MAX)
+        return 0;
+    if (strncmp(name, GC_UPDATE_ZIP_PREFIX, prefix) != 0)
+        return 0;
+    if (strcmp(name + length - suffix, GC_UPDATE_ZIP_SUFFIX) != 0)
+        return 0;
+    return 1;
 }
 
 int gc_update_info_validate(const GcUpdateInfo *info, char *error,
                             size_t error_size)
 {
-    if (!info || !info->tag[0] ||
-        strcmp(info->asset_name, "Ghostcontrol.elf") != 0 ||
+    if (!info || !info->tag[0] || !gc_update_is_app_zip(info->asset_name) ||
         strncmp(info->url, GC_UPDATE_URL_PREFIX,
                 sizeof(GC_UPDATE_URL_PREFIX) - 1) != 0) {
         set_error(error, error_size, "release metadata is not from the official asset");
         return -1;
     }
-    if (info->size < 65536u || info->size > 32u * 1024u * 1024u) {
+    if (info->size < GC_UPDATE_SIZE_MIN || info->size > GC_UPDATE_SIZE_MAX) {
         set_error(error, error_size, "release size is outside the payload limit");
         return -1;
     }
@@ -88,17 +104,16 @@ int gc_update_info_validate(const GcUpdateInfo *info, char *error,
     return 0;
 }
 
-int gc_update_elf_validate(const void *header, size_t header_size,
+int gc_update_zip_validate(const void *header, size_t header_size,
                            uint64_t file_size, char *error,
                            size_t error_size)
 {
     const unsigned char *bytes = header;
-    if (!bytes || header_size < 64 || file_size < 65536u ||
-        bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' ||
-        bytes[3] != 'F' || bytes[4] != 2 || bytes[5] != 1 ||
-        (bytes[16] != 2 && bytes[16] != 3) || bytes[17] != 0 ||
-        bytes[18] != 0x3e || bytes[19] != 0) {
-        set_error(error, error_size, "download is not a valid x86-64 ELF payload");
+    /* PK\x03\x04: the local file header that opens every non-empty ZIP. */
+    if (!bytes || header_size < 4 || file_size < GC_UPDATE_SIZE_MIN ||
+        bytes[0] != 'P' || bytes[1] != 'K' || bytes[2] != 0x03 ||
+        bytes[3] != 0x04) {
+        set_error(error, error_size, "download is not a valid ZIP archive");
         return -1;
     }
     return 0;

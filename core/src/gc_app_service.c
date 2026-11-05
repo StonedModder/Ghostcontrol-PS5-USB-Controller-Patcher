@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
- * Explicit companion for the native app. Update execution stays refused.
+ * Explicit companion for the native app. Online update check/download is
+ * enabled on the resident payload build against the public GitHub releases
+ * API. Host and diagnostic builds keep update execution refused.
  * Console identity, setup, Bluetooth, device inventory and motion are wired
  * on the payload build. No SystemService and no process attach. */
 #ifndef _DEFAULT_SOURCE
@@ -15,6 +17,10 @@
 #if defined(__PROSPERO__) && !defined(GC_APP_SERVICE_DIAGNOSTIC)
 #define GC_APP_SERVICE_RESIDENT 1
 #include "gc_service_features.h"
+#define GC_APP_UPDATE 1
+#include "gc_update.h"
+#include "gc_install.h"
+#include "gc_product_version.h"
 #endif
 #include "gc_app_service_audio.h"
 #include "gc_service_capture.h"
@@ -36,6 +42,14 @@
 #define GC_APP_SERVICE_PORT 39073
 #endif
 #define GC_APP_SERVICE_VERSION "2.0.0-app-service-candidate"
+#ifndef GC_UPDATE_DATA_ROOT
+#define GC_UPDATE_DATA_ROOT GC_DATA_ROOT
+#endif
+/* Installed titles live one folder per title id here. The updater replaces the
+ * entries of that folder once the app has closed. */
+#ifndef GC_INSTALL_ROOT
+#define GC_INSTALL_ROOT "/data/homebrew"
+#endif
 
 typedef struct GcAppService {
     pthread_mutex_t mutex; /* Entire command/config/pad lifetime, one owner. */
@@ -53,6 +67,10 @@ typedef struct GcAppService {
     unsigned short port;
     uint64_t started_ms;
     char root[GC_CONFIG_PATH_MAX];
+#if defined(GC_APP_UPDATE)
+    GcUpdateInfo latest_update;
+    int latest_update_valid;
+#endif
 } GcAppService;
 #if defined(GC_RESIDENT_EXIT_HOST_TEST) && !defined(__PROSPERO__)
 static int app_release_host_stage(const char *stage);
@@ -167,6 +185,13 @@ static struct json_object *app_caps(void)
     BOOL(o,"device_inventory",1); BOOL(o,"motion",1);
     /* Compiled-in routing is not an API-only virtual identity provider.
      * Do not advertise console output or type support from a target macro. */
+#endif
+#if defined(GC_APP_UPDATE)
+    /* Check queries GitHub only. Download stages a verified ZIP under
+     * /data/ghostcontrol/updates/ and never auto-runs or replaces the live
+     * title; the user still confirms install separately. */
+    BOOL(o,"update_check",1);
+    BOOL(o,"update_execution",1);
 #endif
     return o;
 }
@@ -498,6 +523,205 @@ static int app_resident_exit(GcAppService *s,const char *arg,char *out,size_t ca
     return GC_IPC_REPLY_DEFERRED;
 }
 
+#if defined(GC_APP_UPDATE)
+/* The version that is actually installed, not the one this binary was built
+ * from: the companion is loaded separately from the app it serves, so its own
+ * compile-time constant can be newer or older than what is on disk. */
+static const char *app_installed_version(char *buffer, size_t size)
+{
+    if (gc_install_read_version(GC_INSTALL_ROOT "/" GC_UPDATE_APP_TITLE, buffer,
+                                size) == 0 && buffer[0])
+        return buffer;
+    snprintf(buffer, size, "%s", GC_PRODUCT_VERSION);
+    return buffer;
+}
+
+/* Network work intentionally drops the service mutex so STATUS/pad keep moving
+ * while GitHub is contacted. The update cache fields are only touched while
+ * the lock is held. Download stages a verified ZIP; it never replaces the
+ * live title folder. */
+static int app_update_command(GcAppService *s, const char *cmd, char *out,
+                              size_t cap)
+{
+    char error[256] = "";
+    GcRuntimeConfig runtime;
+    if (!s->config || gc_config_snapshot(s->config, &runtime, NULL) != 0)
+        return app_error("configuration_unavailable", NULL, out, cap);
+    if (!runtime.update_enabled)
+        return app_error("updates_disabled", "updates are disabled", out, cap);
+
+    if (!strcmp(cmd, "UPDATE_CHECK")) {
+        GcUpdateInfo info;
+        int include = runtime.include_prereleases;
+        char installed[GC_INSTALL_VERSION_MAX];
+        app_installed_version(installed, sizeof(installed));
+        pthread_mutex_unlock(&s->mutex);
+        int rc = gc_update_check(installed, include, &info, error,
+                                 sizeof(error));
+        pthread_mutex_lock(&s->mutex);
+        if (rc != 0)
+            return app_error("update_failed", error[0] ? error : "check failed",
+                             out, cap);
+        s->latest_update = info;
+        s->latest_update_valid = 1;
+        char tag_hex[GC_UPDATE_TAG_MAX * 2 + 1];
+        if (gc_ipc_hex_encode(info.tag, strlen(info.tag), tag_hex,
+                              sizeof(tag_hex)) != 0)
+            return app_error("update_failed", "tag encode failed", out, cap);
+        struct json_object *o = json_object_new_object();
+        BOOL(o, "ok", 1);
+        BOOL(o, "available", info.available);
+        STR(o, "tag_encoding", "hex");
+        STR(o, "tag", tag_hex);
+        NUM(o, "size", info.size);
+        STR(o, "sha256", info.sha256);
+        STR(o, "asset", info.asset_name);
+        STR(o, "installed", installed);
+        BOOL(o, "include_prereleases", include);
+        return app_json(o, out, cap);
+    }
+
+    if (!strcmp(cmd, "UPDATE_DOWNLOAD")) {
+        GcUpdateInfo info;
+        int valid = s->latest_update_valid;
+        info = s->latest_update;
+        if (!valid) {
+            /* Fresh check under the same unlock rules as UPDATE_CHECK. */
+            int include = runtime.include_prereleases;
+            pthread_mutex_unlock(&s->mutex);
+            char installed[GC_INSTALL_VERSION_MAX];
+            app_installed_version(installed, sizeof(installed));
+            int rc = gc_update_check(installed, include, &info, error,
+                                     sizeof(error));
+            pthread_mutex_lock(&s->mutex);
+            if (rc != 0)
+                return app_error("update_failed",
+                                 error[0] ? error : "check failed", out, cap);
+            s->latest_update = info;
+            s->latest_update_valid = 1;
+        }
+        if (!info.available) {
+            struct json_object *o = json_object_new_object();
+            BOOL(o, "ok", 1);
+            BOOL(o, "downloaded", 0);
+            STR(o, "reason", "up_to_date");
+            return app_json(o, out, cap);
+        }
+        pthread_mutex_unlock(&s->mutex);
+        int rc = gc_update_download(GC_UPDATE_DATA_ROOT, &info, error,
+                                    sizeof(error));
+        pthread_mutex_lock(&s->mutex);
+        if (rc != 0)
+            return app_error("update_failed",
+                             error[0] ? error : "download failed", out, cap);
+        char tag_hex[GC_UPDATE_TAG_MAX * 2 + 1];
+        if (gc_ipc_hex_encode(info.tag, strlen(info.tag), tag_hex,
+                              sizeof(tag_hex)) != 0)
+            return app_error("update_failed", "tag encode failed", out, cap);
+        struct json_object *o = json_object_new_object();
+        BOOL(o, "ok", 1);
+        BOOL(o, "downloaded", 1);
+        STR(o, "tag_encoding", "hex");
+        STR(o, "tag", tag_hex);
+        STR(o, "path",
+            GC_UPDATE_DATA_ROOT "/updates/Ghostcontrol-Toolbox-app.zip");
+        STR(o, "asset", info.asset_name);
+        return app_json(o, out, cap);
+    }
+
+    if (!strcmp(cmd, "UPDATE_ROLLBACK")) {
+        pthread_mutex_unlock(&s->mutex);
+        int rc = gc_update_rollback(GC_UPDATE_DATA_ROOT, error, sizeof(error));
+        pthread_mutex_lock(&s->mutex);
+        if (rc != 0)
+            return app_error("update_failed",
+                             error[0] ? error : "rollback failed", out, cap);
+        struct json_object *o = json_object_new_object();
+        BOOL(o, "ok", 1);
+        BOOL(o, "rolled_back", 1);
+        return app_json(o, out, cap);
+    }
+
+    if (!strcmp(cmd, "UPDATE_INSTALL")) {
+        /* One staging area, one apply thread: a second stage would write
+         * into the folder the swap is consuming. */
+        if (gc_install_pending())
+            return app_error("update_pending",
+                             "an update is already waiting for this app to close",
+                             out, cap);
+        GcUpdateInfo info;
+        int valid = s->latest_update_valid;
+        info = s->latest_update;
+        if (!valid) {
+            int include = runtime.include_prereleases;
+            pthread_mutex_unlock(&s->mutex);
+            char installed[GC_INSTALL_VERSION_MAX];
+            app_installed_version(installed, sizeof(installed));
+            int rc = gc_update_check(installed, include, &info, error,
+                                     sizeof(error));
+            pthread_mutex_lock(&s->mutex);
+            if (rc != 0)
+                return app_error("update_failed",
+                                 error[0] ? error : "check failed", out, cap);
+            s->latest_update = info;
+            s->latest_update_valid = 1;
+        }
+        if (!info.available) {
+            struct json_object *o = json_object_new_object();
+            BOOL(o, "ok", 1);
+            BOOL(o, "installed", 0);
+            STR(o, "reason", "up_to_date");
+            return app_json(o, out, cap);
+        }
+        char archive[512], work[512], target[512];
+        const char *version = info.tag[0] == 'v' || info.tag[0] == 'V'
+                                  ? info.tag + 1 : info.tag;
+        if (snprintf(archive, sizeof(archive),
+                     "%s/updates/Ghostcontrol-Toolbox-app.zip",
+                     GC_UPDATE_DATA_ROOT) >= (int)sizeof(archive) ||
+            snprintf(work, sizeof(work), "%s/updates", GC_UPDATE_DATA_ROOT) >=
+                (int)sizeof(work) ||
+            snprintf(target, sizeof(target), "%s/%s", GC_INSTALL_ROOT,
+                     GC_UPDATE_APP_TITLE) >= (int)sizeof(target))
+            return app_error("update_failed", "install path too long", out, cap);
+
+        pthread_mutex_unlock(&s->mutex);
+        int rc = 0;
+        /* Always fetch: the download is the only place the size and SHA-256
+         * of this release are checked, and a file left at this fixed path by
+         * an older check must never be installed. */
+        rc = gc_update_download(GC_UPDATE_DATA_ROOT, &info, error,
+                                sizeof(error));
+        char staged_version[GC_INSTALL_VERSION_MAX] = "";
+        unsigned files = 0;
+        if (rc == 0)
+            rc = gc_install_stage(archive, GC_UPDATE_APP_TITLE, version, work,
+                                  staged_version, sizeof(staged_version),
+                                  &files, error, sizeof(error));
+        if (rc == 0)
+            rc = gc_install_arm(GC_UPDATE_APP_TITLE, target, work,
+                                staged_version[0] ? staged_version : version,
+                                error, sizeof(error));
+        pthread_mutex_lock(&s->mutex);
+        if (rc != 0)
+            return app_error("update_failed",
+                             error[0] ? error : "install failed", out, cap);
+
+        struct json_object *o = json_object_new_object();
+        BOOL(o, "ok", 1);
+        BOOL(o, "staged", 1);
+        BOOL(o, "apply_pending", 1);
+        BOOL(o, "close_app", 1);
+        NUM(o, "files", files);
+        STR(o, "version", staged_version[0] ? staged_version : version);
+        STR(o, "target", target);
+        return app_json(o, out, cap);
+    }
+
+    return app_error("unsupported_update_execution", NULL, out, cap);
+}
+#endif
+
 static int app_command_locked(GcAppService *s,const char *cmd,const char *arg,char *out,size_t cap)
 {
     if(!arg) arg="";
@@ -506,7 +730,7 @@ static int app_command_locked(GcAppService *s,const char *cmd,const char *arg,ch
     if(!strncmp(cmd,"AUDIO_",6)) return gc_service_audio_command(s->audio,cmd,arg,out,cap);
     for(const unsigned char *p=(const unsigned char *)arg;*p;p++)
         if(*p<32 || *p==127) return app_error("invalid_argument",NULL,out,cap);
-    const char *noarg[]={"PING","START","STOP","RESTART","RELOAD","RUNTIME_GET","DUALSENSE_FX_STATUS","DUALSENSE_RUMBLE_STOP","PROFILES","PROFILE_FILES","DEVICES","CONTROLLERS"};
+    const char *noarg[]={"PING","START","STOP","RESTART","RELOAD","RUNTIME_GET","DUALSENSE_FX_STATUS","DUALSENSE_RUMBLE_STOP","PROFILES","PROFILE_FILES","DEVICES","CONTROLLERS","UPDATE_CHECK","UPDATE_DOWNLOAD","UPDATE_ROLLBACK","UPDATE_INSTALL"};
     for(size_t i=0;i<sizeof(noarg)/sizeof(noarg[0]);i++)
         if(!strcmp(cmd,noarg[i]) && *arg) return app_error("unexpected_argument",NULL,out,cap);
     {
@@ -532,6 +756,10 @@ static int app_command_locked(GcAppService *s,const char *cmd,const char *arg,ch
     if(!strcmp(cmd,"RUNTIME_SET")) {
         int rc=gc_runtime_command_set(s->config,arg,out,cap); if(rc) return rc;
         if(app_sync(s)) return app_error("config_saved_but_sync_failed",NULL,out,cap);
+#if defined(GC_APP_UPDATE)
+        if(!strncmp(arg,"include_prereleases=",20) || !strncmp(arg,"update_enabled=",15))
+            s->latest_update_valid=0;
+#endif
         struct json_object *o=json_tokener_parse(out);
         int fx=!strncmp(arg,"dualsense_fx_",13);
         BOOL(o,"runtime_supported",fx); BOOL(o,"applied",0);
@@ -581,6 +809,11 @@ static int app_command_locked(GcAppService *s,const char *cmd,const char *arg,ch
     if(!strcmp(cmd,"DEVICES") || !strcmp(cmd,"CONTROLLERS"))
         return app_error("unsupported_usb_vda_inventory","App native pad observations are in STATUS.native_pad",out,cap);
     if(!strncmp(cmd,"BLUETOOTH_",10)) return app_error("unsupported_bluetooth_host_unavailable",NULL,out,cap);
+#if defined(GC_APP_UPDATE)
+    if(!strcmp(cmd,"UPDATE_CHECK") || !strcmp(cmd,"UPDATE_DOWNLOAD") ||
+       !strcmp(cmd,"UPDATE_ROLLBACK") || !strcmp(cmd,"UPDATE_INSTALL"))
+        return app_update_command(s,cmd,out,cap);
+#endif
     if(!strncmp(cmd,"UPDATE_",7)) return app_error("unsupported_update_execution",NULL,out,cap);
     if(!strcmp(cmd,"CONSOLE_ID")) return app_error("unsupported_documented_console_id_api_unavailable",NULL,out,cap);
     if(!strcmp(cmd,"REBIND") || !strcmp(cmd,"FORCE_VDA")) return app_error("unsupported_kernel_game_bridge",NULL,out,cap);

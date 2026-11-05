@@ -220,6 +220,19 @@ int main()
         previous = now;
 
         const std::size_t count = pad.read(samples);
+        /* The pad's top bit means the system also has this input. That must not
+         * make the app deaf: the launch notice is a modal with no other way out,
+         * so a sample carrying it would soft-lock the app. Keep the bit for the
+         * record, give the tracker the plain buttons. */
+        bool intercepted_now = false;
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            if ((samples[i].buttons & hui::pad_bits::kIntercepted) != 0)
+            {
+                intercepted_now = true;
+                samples[i].buttons &= ~hui::pad_bits::kIntercepted;
+            }
+        }
         const hui::InputFrame input = tracker.update(
             std::span<const hui::PadSample>(samples.data(), count),
             static_cast<std::uint64_t>(now));

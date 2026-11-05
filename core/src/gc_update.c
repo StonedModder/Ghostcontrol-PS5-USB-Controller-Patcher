@@ -219,9 +219,9 @@ static int release_info(json_object *release, int include_prereleases,
     size_t count = json_object_array_length(value);
     for (size_t i = 0; i < count; ++i) {
         json_object *asset = json_object_array_get_idx(value, i);
-        char name[64];
+        char name[GC_UPDATE_ASSET_MAX];
         if (copy_json_string(asset, "name", name, sizeof(name)) != 0 ||
-            strcmp(name, "Ghostcontrol.elf") != 0)
+            !gc_update_is_app_zip(name))
             continue;
         memset(info, 0, sizeof(*info));
         if (copy_json_string(release, "tag_name", info->tag, sizeof(info->tag)) != 0 ||
@@ -243,7 +243,7 @@ static int release_info(json_object *release, int include_prereleases,
         return gc_update_info_validate(info, error, error_size);
     }
     set_error(error, error_size,
-              "No verified Ghostcontrol.elf download found in this release");
+              "No verified Ghostcontrol app bundle (.zip) found in this release");
     return -1;
 }
 
@@ -257,9 +257,11 @@ int gc_update_check(const char *current_version, int include_prereleases,
     if (ensure_ca_bundle("/data/ghostcontrol", ca_path,
                          error, error_size) != 0)
         return -1;
+    /* Always scan the release list. Stable keeps prereleases out; the prerelease
+     * channel accepts both. /releases/latest alone is not enough: older 1.x
+     * stables only shipped a combined ELF, while 2.x ships the app ZIP. */
     char url[sizeof(GC_UPDATE_API) + 32];
-    snprintf(url, sizeof(url), "%s/%s", GC_UPDATE_API,
-             include_prereleases ? "releases?per_page=10" : "releases/latest");
+    snprintf(url, sizeof(url), "%s/releases?per_page=15", GC_UPDATE_API);
     MemoryBuffer buffer = {NULL, 0, GC_UPDATE_JSON_LIMIT};
     if (http_json(url, ca_path, &buffer, error, error_size) != 0) {
         free(buffer.data);
@@ -267,19 +269,17 @@ int gc_update_check(const char *current_version, int include_prereleases,
     }
     json_object *root = json_tokener_parse((const char *)buffer.data);
     free(buffer.data);
-    if (!root) {
+    if (!root || !json_object_is_type(root, json_type_array)) {
+        if (root)
+            json_object_put(root);
         set_error(error, error_size, "GitHub returned invalid JSON");
         return -1;
     }
     int result = -1;
-    if (include_prereleases && json_object_is_type(root, json_type_array)) {
-        size_t count = json_object_array_length(root);
-        for (size_t i = 0; i < count && result != 0; ++i)
-            result = release_info(json_object_array_get_idx(root, i), 1,
-                                  info, error, error_size);
-    } else {
-        result = release_info(root, 0, info, error, error_size);
-    }
+    size_t count = json_object_array_length(root);
+    for (size_t i = 0; i < count && result != 0; ++i)
+        result = release_info(json_object_array_get_idx(root, i),
+                              include_prereleases, info, error, error_size);
     json_object_put(root);
     if (result != 0)
         return -1;
@@ -347,7 +347,7 @@ static int validate_download(const char *path, const GcUpdateInfo *info,
     if (fd >= 0)
         close(fd);
     return count == (ssize_t)sizeof(header)
-               ? gc_update_elf_validate(header, sizeof(header), size,
+               ? gc_update_zip_validate(header, sizeof(header), size,
                                         error, error_size) : -1;
 }
 
@@ -380,15 +380,20 @@ int gc_update_download(const char *root, const GcUpdateInfo *info,
 {
     if (!root || gc_update_info_validate(info, error, error_size) != 0)
         return -1;
-    char ca_path[512], staged[544], current[512], previous[544];
+    char ca_path[512], staged[544], current[512], previous[544], updates[512];
     if (ensure_ca_bundle(root, ca_path, error, error_size) != 0 ||
-        snprintf(staged, sizeof(staged), "%s/updates/Ghostcontrol.elf.download.%d",
-                 root, getpid()) >= (int)sizeof(staged) ||
-        snprintf(current, sizeof(current), "%s/updates/Ghostcontrol.elf", root) >=
+        snprintf(updates, sizeof(updates), "%s/updates", root) >=
+                 (int)sizeof(updates) ||
+        snprintf(staged, sizeof(staged),
+                 "%s/Ghostcontrol-Toolbox-app.zip.download.%d", updates,
+                 getpid()) >= (int)sizeof(staged) ||
+        snprintf(current, sizeof(current),
+                 "%s/Ghostcontrol-Toolbox-app.zip", updates) >=
                  (int)sizeof(current) ||
         snprintf(previous, sizeof(previous), "%s.previous", current) >=
                  (int)sizeof(previous))
         return -1;
+    (void)mkdir(updates, 0755);
     int fd = open(staged, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
         set_error(error, error_size, "cannot create update staging file: %s",
@@ -457,13 +462,14 @@ int gc_update_download(const char *root, const GcUpdateInfo *info,
 int gc_update_rollback(const char *root, char *error, size_t error_size)
 {
     char current[512], previous[544], failed[544];
-    if (!root || snprintf(current, sizeof(current),
-                          "%s/updates/Ghostcontrol.elf", root) >=
-                     (int)sizeof(current) ||
+    if (!root ||
+        snprintf(current, sizeof(current),
+                 "%s/updates/Ghostcontrol-Toolbox-app.zip", root) >=
+            (int)sizeof(current) ||
         snprintf(previous, sizeof(previous), "%s.previous", current) >=
-                     (int)sizeof(previous) ||
+            (int)sizeof(previous) ||
         snprintf(failed, sizeof(failed), "%s.failed", current) >=
-                     (int)sizeof(failed))
+            (int)sizeof(failed))
         return -1;
     struct stat info;
     if (lstat(previous, &info) != 0 || !S_ISREG(info.st_mode) ||

@@ -491,6 +491,8 @@ std::string resolve_live(LiveSource source, const ServiceSnapshot::View &service
         return bool_text(service.runtime_json, "run_in_background");
     case LiveSource::runtime_wireless:
         return bool_text(service.runtime_json, "wireless_ds4");
+    case LiveSource::runtime_include_prereleases:
+        return bool_text(service.runtime_json, "include_prereleases");
     case LiveSource::runtime_ghostpad:
     {
         const std::string_view enabled = json_value(service.runtime_json, "ghostpad_enabled");
@@ -1095,6 +1097,9 @@ void ToolboxUi::open_beta_disclaimer(hui::ui::Feedback &feedback)
     beta_dialog_.style.width = 880.0f;
     beta_dialog_.style.body_lines = 12;
     beta_dialog_.style.buttons = hui::ui::DialogButtons::row;
+    /* Belt and braces: a launch notice must always be escapable. Back closes it
+     * without saving, so no pad state can leave the app stuck on it. */
+    beta_dialog_.style.dismissable = true;
     beta_dialog_.open(std::move(content), feedback);
 }
 
@@ -1705,6 +1710,11 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
 
     /* Launch disclaimer owns the frame while it is up: open once after arm
      * unless "Don't show again" is saved, then take every input. */
+    /* The dialog's fade is driven by update(), and visible() stays true while
+     * the fade is above zero. Driving it only while is_open() leaves a closed
+     * dialog painted forever as a ghost that takes no input; keep it running
+     * every frame so a dismissal actually clears the screen. */
+    beta_dialog_.update(dt);
     if (beta_disclaimer_armed_ && !beta_disclaimer_checked_)
     {
         beta_disclaimer_checked_ = true;
@@ -1714,7 +1724,6 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
     }
     if (beta_dialog_.is_open())
     {
-        beta_dialog_.update(dt);
         const hui::ui::Event event = beta_dialog_.handle(input, feedback);
         if (event == hui::ui::Event::activated)
         {

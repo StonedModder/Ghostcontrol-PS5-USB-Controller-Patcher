@@ -105,6 +105,8 @@ class ToolboxUi
      *  is already saved. */
     void arm_beta_disclaimer() { beta_disclaimer_armed_ = true; }
     bool beta_disclaimer_open() const { return beta_dialog_.is_open(); }
+    /** True while the notice is painted, including its fade-out. */
+    bool beta_disclaimer_visible() const { return beta_dialog_.visible(); }
     /** Host-harness hook: open the disclaimer without the preference check. */
     void open_beta_disclaimer(hui::ui::Feedback &feedback);
     /** Host-harness only: point the disclaimer preference at a private file. */

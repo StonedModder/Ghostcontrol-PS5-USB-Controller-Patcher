@@ -49,6 +49,7 @@ inline const char *toggle_key(LiveSource source)
     case LiveSource::rt_toggle_ghostpad: return "ghostpad_enabled";
     case LiveSource::rt_toggle_wireless: return "wireless_ds4";
     case LiveSource::rt_toggle_fx: return "dualsense_fx_enabled";
+    case LiveSource::rt_toggle_include_prereleases: return "include_prereleases";
     default: return nullptr;
     }
 }

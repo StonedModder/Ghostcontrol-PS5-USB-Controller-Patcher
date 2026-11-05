@@ -75,7 +75,12 @@ SOURCES := \
 	$(SRC)/audio/gc_audio_codec.c \
 	$(SRC)/audio/gc_audio_controls.c \
 	$(SRC)/gc_file_safety.c \
-	$(SRC)/gc_service_inject.c
+	$(SRC)/gc_service_inject.c \
+	$(SRC)/gc_update.c \
+	$(SRC)/gc_update_policy.c \
+	$(SRC)/gc_install.c \
+	$(SRC)/gc_notify.c \
+	$(SRC)/gc_ca_bundle.S
 
 # Explicit additive diagnostic closure: the real ordinary service modules only.
 # Full resident sources above remain the default and are never replaced.
@@ -87,15 +92,25 @@ ifeq ($(VARIANT),resident-no-capture)
 VARIANT_CFLAGS := -DGC_APP_SERVICE_NO_AUDIO_CAPTURE=1
 endif
 
+# CA path must be set before CFLAGS so .incbin embeds the real bundle.
+GC_CA_BUNDLE ?= $(PORTS)/etc/ca-bundle.crt
+
 CFLAGS := -std=c11 -D_DEFAULT_SOURCE= -Wall -Wextra -Wshadow -Werror -O2 -fPIC \
 	-fno-stack-protector -ffunction-sections -fdata-sections \
 	-D__PROSPERO__ $(VARIANT_CFLAGS) -DGC_APP_SERVICE_PORT=$(PORT) -DGC_IPC_BIND_LAN=1 \
-	-I$(SRC) -I$(SRC)/bt -I$(PORTS)/include
+	-I$(SRC) -I$(SRC)/bt -I$(PORTS)/include \
+	-DGC_CA_BUNDLE_PATH=\"$(GC_CA_BUNDLE)\"
 
-LDFLAGS := -Wl,--gc-sections,--build-id=sha1 -L$(PS5_PAYLOAD_SDK)/target/lib -L$(PORTS)/lib -lScePad -lSceUserService -lSceNotification -lkernel -lkernel_sys -ldl -ljson-c -lpthread -lm
+# Resident updater needs curl + TLS stack against the public GitHub releases API.
+LDFLAGS := -Wl,--gc-sections,--build-id=sha1 -L$(PS5_PAYLOAD_SDK)/target/lib -L$(PORTS)/lib \
+	-lScePad -lSceUserService -lSceNotification -lkernel -lkernel_sys -ldl \
+	-lcurl -lssl -lcrypto -lpsl -lzstd -lminizip -lz -ljson-c -lpthread -lm
 
 # Resident routing has a separate host-only gate. Never confuse it with
 # `test` below, which is a live console deployment, not a host test.
+.PHONY: host-routing-test
+host-routing-test:
+	bash ../tools/test-service-routing.sh
 
 all: $(ELF)
 
@@ -106,5 +121,5 @@ $(ELF): $(SOURCES) $(wildcard $(SRC)/*.h $(SRC)/bt/*.h $(SRC)/audio/*.h) Makefil
 clean:
 	rm -f $(ELF)
 
-deploy: $(ELF)
+test: $(ELF)
 	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $^
