@@ -13,7 +13,7 @@
 | Private dev tree | [`ghostcontrol-toolbox-2.0`](https://github.com/StonedModder/ghostcontrol-toolbox-2.0) (this repo is the clean product mirror) |
 
 <p align="center">
-  <img src="media/screenshots/01-controllers.png" alt="Controllers" width="720" />
+  <img src="media/screenshots/02-controllers.png" alt="Controllers" width="720" />
 </p>
 
 ---
@@ -34,12 +34,16 @@
 Full source inventory: [`FEATURES.md`](FEATURES.md). User guides: [`docs/wiki/`](docs/wiki/).
 
 <p align="center">
-  <img src="media/screenshots/02-profiles.png" width="340" alt="Profiles" />
-  <img src="media/screenshots/03-guided-setup.png" width="340" alt="Guided setup" />
+  <img src="media/screenshots/03-profiles.png" width="340" alt="Profiles" />
+  <img src="media/screenshots/04-guided-setup.png" width="340" alt="Guided setup" />
 </p>
 <p align="center">
-  <img src="media/screenshots/04-lights-rumble.png" width="340" alt="Lights and rumble" />
-  <img src="media/screenshots/05-service.png" width="340" alt="Service" />
+  <img src="media/screenshots/05-lights-rumble.png" width="340" alt="Lights and rumble" />
+  <img src="media/screenshots/06-bluetooth.png" width="340" alt="Bluetooth" />
+</p>
+<p align="center">
+  <img src="media/screenshots/07-service.png" width="340" alt="Service" />
+  <img src="media/screenshots/08-diagnostics.png" width="340" alt="Diagnostics" />
 </p>
 
 ---
@@ -61,7 +65,7 @@ USB / BT controller ──► GhosttoothAPI (resident service, ELF loader :9021)
 The app never injects into ShellUI. It is a normal homebrew title with ordinary pad, user-service, and network APIs. IPC is local-only (loopback / console address).
 
 <p align="center">
-  <img src="media/screenshots/06-beta-disclaimer.png" alt="Beta disclaimer on launch" width="720" />
+  <img src="media/screenshots/01-beta-disclaimer.png" alt="Beta disclaimer on launch" width="720" />
 </p>
 
 *Beta builds show a one-time launch notice; **Don’t show again** saves the preference.*
