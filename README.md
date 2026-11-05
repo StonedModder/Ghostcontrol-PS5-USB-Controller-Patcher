@@ -1,7 +1,9 @@
 # Ghostcontrol
 
 <p align="center">
-  <img src="media/brand/logo.png" alt="Ghostcontrol" width="160" />
+  <img src="media/brand/logo.png" alt="Ghostcontrol" width="140" />
+  &nbsp;&nbsp;
+  <img src="media/brand/icon0.png" alt="App icon" width="140" />
 </p>
 
 **Ghostcontrol** lets you use third-party USB and Bluetooth controllers on a jailbroken PS5. A resident controller service owns the hardware; a native home-screen app — **Ghostcontrol Toolbox** — is the GUI. Nothing here patches ShellUI, decrypts system bundles, or depends on firmware offset tables.
@@ -11,6 +13,37 @@
 | Current beta | **2.2.2** — native Toolbox title (PPSA62838 lineage) |
 | Layout | `core/` service · `ui/` homebrew app · `GhosttoothAPI/` companion ELF |
 | Private dev tree | [`ghostcontrol-toolbox-2.0`](https://github.com/StonedModder/ghostcontrol-toolbox-2.0) (this repo is the clean product mirror) |
+
+### Support the project
+
+If Ghostcontrol helps you, tips keep development going:
+
+<p align="center">
+  <a href="https://discord.com/invite/kcgQPxhde"><img src="media/brand/qr/discord.png" alt="Discord QR" width="120" /></a>
+  &nbsp;&nbsp;&nbsp;
+  <img src="media/brand/qr/btc.png" alt="Bitcoin QR" width="120" />
+  &nbsp;&nbsp;&nbsp;
+  <a href="https://www.patreon.com/c/u4772250"><img src="media/brand/qr/patreon.png" alt="Patreon QR" width="120" /></a>
+  &nbsp;&nbsp;&nbsp;
+  <img src="media/brand/qr/lightning.png" alt="Lightning QR" width="120" />
+</p>
+
+<p align="center">
+
+| | |
+|---|---|
+| **Discord** | [discord.com/invite/kcgQPxhde](https://discord.com/invite/kcgQPxhde) |
+| **Bitcoin** | `bc1qa9zfgnccajsw8vg7k287qz5a7apf8pefj5jjx5` |
+| **Patreon** | [patreon.com/c/u4772250](https://www.patreon.com/c/u4772250) |
+| **Lightning** | Scan the Lightning QR above (same tip jar as in the app) |
+
+</p>
+
+<p align="center">
+  <img src="media/screenshots/01-beta-disclaimer.png" alt="Beta disclaimer on launch" width="720" />
+</p>
+
+*Beta builds show a one-time launch notice; **Don’t show again** saves the preference.*
 
 <p align="center">
   <img src="media/screenshots/02-controllers.png" alt="Controllers" width="720" />
@@ -29,7 +62,7 @@
 | **Bluetooth** | Classic + LE gamepads, pair / forget / retry |
 | **Service** | Start / stop / restart companion, autostart, diagnostics, log tail |
 | **GhostPad** | Optional network pad input for remote / ESP bridges |
-| **About** | Credits, support links, QR codes |
+| **About / Donate** | Credits, support links, Discord / BTC / Patreon QR codes |
 
 Full source inventory: [`FEATURES.md`](FEATURES.md). User guides: [`docs/wiki/`](docs/wiki/).
 
@@ -44,6 +77,10 @@ Full source inventory: [`FEATURES.md`](FEATURES.md). User guides: [`docs/wiki/`]
 <p align="center">
   <img src="media/screenshots/07-service.png" width="340" alt="Service" />
   <img src="media/screenshots/08-diagnostics.png" width="340" alt="Diagnostics" />
+</p>
+<p align="center">
+  <img src="media/screenshots/09-about.png" width="340" alt="About" />
+  <img src="media/screenshots/10-donate.png" width="340" alt="Donate" />
 </p>
 
 ---
@@ -63,12 +100,6 @@ USB / BT controller ──► GhosttoothAPI (resident service, ELF loader :9021)
 4. Plug in your controller, assign the virtual DualSense when the PS5 asks, and play.
 
 The app never injects into ShellUI. It is a normal homebrew title with ordinary pad, user-service, and network APIs. IPC is local-only (loopback / console address).
-
-<p align="center">
-  <img src="media/screenshots/01-beta-disclaimer.png" alt="Beta disclaimer on launch" width="720" />
-</p>
-
-*Beta builds show a one-time launch notice; **Don’t show again** saves the preference.*
 
 ---
 
@@ -153,9 +184,12 @@ Historical research notes such as `ProControllerResearch.md` remain under `docs/
 
 ## Support
 
-If Ghostcontrol helps you, donations are appreciated:
+Tips keep the project moving — same destinations as the in-app Donate page:
 
-`bc1qa9zfgnccajsw8vg7k287qz5a7apf8pefj5jjx5`
+- **Discord:** [https://discord.com/invite/kcgQPxhde](https://discord.com/invite/kcgQPxhde)
+- **Bitcoin:** `bc1qa9zfgnccajsw8vg7k287qz5a7apf8pefj5jjx5`
+- **Patreon:** [https://www.patreon.com/c/u4772250](https://www.patreon.com/c/u4772250)
+- **QR codes:** `media/brand/qr/` (Discord, BTC, Patreon, Lightning)
 
 ---
 
