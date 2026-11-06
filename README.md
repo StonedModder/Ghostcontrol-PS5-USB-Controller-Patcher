@@ -41,8 +41,26 @@ https://github.com/user-attachments/assets/6583b1c2-3d3d-4f2e-9e79-689121fea4a3
 |-----------|------|---------|--------|
 | 8BitDo Ultimate 2 | Nintendo Switch Pro | 057e:2009 | ✅ Working |
 | 8BitDo Ultimate 2 | Native | 2dc8:310b | Untested |
+| Generic GameCube-style USB pad (DragonRise / "Microntek USB Joystick") | HID | 0079:0006 | ✅ Working |
 
 See `othercontrollersGuide.md` for adding new controllers.
+
+### GameCube-style pad mapping
+
+| GameCube | PS5 |
+|----------|-----|
+| A / B / X / Y | Cross / Square / Circle / Triangle (by position) |
+| Z | R1 |
+| L / R | L2 / R2 (digital, sent as full press) |
+| Start | Options |
+| Start + Z | PS button |
+| Main stick / C-stick | Left stick / Right stick (C-stick scaled ×2 to full range) |
+| D-pad | D-pad |
+
+The pad has no L1, L3, R3 or Share. Other DragonRise-based pads may number
+their buttons differently: run `tools/gcpad_capture.c` on Linux
+(`gcc -O2 -o gcpad_capture tools/gcpad_capture.c -lusb-1.0 && sudo ./gcpad_capture`)
+and adjust `GCPAD_BTN_MAP` in `payload/controller_gcpad.c`.
 
 ---
 
