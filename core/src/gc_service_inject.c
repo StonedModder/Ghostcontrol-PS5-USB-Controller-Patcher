@@ -254,6 +254,9 @@ typedef struct {
      * stay silent until the host answers their ANNOUNCE and powers them on. */
     int gip;
     XboxControllerState xbox;
+    /* Genuine DualShock 4 on USB: its lightbar stays dark until the host sends
+     * output report 0x05, so the feed opens the OUT pipe once to set it. */
+    int ds4_out;
 } UsbFeed;
 
 static UsbFeed usb_feed[USB_SLOTS];
@@ -1064,7 +1067,9 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
     feed->ep[0].flags = USB_FS_FLAG_SINGLE_SHORT_OK;
     feed->nintendo = usb_is_nintendo(device->vid, device->pid) && device->out_count;
     feed->gip = device->kind == GC_USB_INTERFACE_GIP && device->out_count;
-    const int ep_max = (feed->nintendo || feed->gip) ? 2 : 1;
+    feed->ds4_out = device->vid == 0x054c &&
+                    (device->pid == 0x05c4 || device->pid == 0x09cc) && device->out_count;
+    const int ep_max = (feed->nintendo || feed->gip || feed->ds4_out) ? 2 : 1;
     /* ep[1] is left zeroed on purpose: usb_send_out() owns the OUT buffers and
      * refuses to write through an endpoint that already has pointers installed. */
     memset(&init, 0, sizeof init);
@@ -1102,6 +1107,25 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
         usb_nintendo_kick(feed);
         feed->hs_state = HS_WAIT_81_01;
         feed->nintendo_seq = 1;
+    }
+    if (feed->ds4_out) {
+        memset(&op, 0, sizeof op);
+        op.ep_index = 1;
+        op.ep_no = device->out[0];
+        op.max_bufsize = 64;
+        op.max_frames = 1;
+        if (ioctl(feed->fd, USB_FS_OPEN, &op) == 0) {
+            /* USB output report 0x05: flags 0x07 = rumble | lightbar | flash,
+             * no rumble, PS4 player-1 blue, no flashing. */
+            static const uint8_t lightbar[32] = { 0x05, 0x07, 0x00, 0x00,
+                                                  0x00, 0x00, 0x00, 0x00, 0x40 };
+            const int sent = usb_send_out(feed->fd, &feed->ep[1], lightbar,
+                                          sizeof lightbar, "ds4_lightbar");
+            log_line("usb: %s DS4 lightbar set=%d", device->path, sent);
+        } else {
+            /* Input works without it; only the lightbar stays dark. */
+            log_line("usb: %s DS4 OUT open errno=%d (%s)", device->path, errno, strerror(errno));
+        }
     }
     if (feed->gip) {
         memset(&op, 0, sizeof op);
