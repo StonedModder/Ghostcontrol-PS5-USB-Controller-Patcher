@@ -182,6 +182,7 @@ typedef struct {
     intptr_t read_ext;
     intptr_t data_internal;
     intptr_t controller_info;
+    intptr_t set_vibration;
     intptr_t usleep;
     intptr_t kill;
     intptr_t clock_gettime;
@@ -213,13 +214,14 @@ static void
 collect_evidence(pid_t pid, const GcDs4SourceSymbols *symbols,
                  GcDs4LibpadEvidence *evidence)
 {
-    const intptr_t functions[GC_DS4_LIBPAD_SYMBOLS] = {
+    const intptr_t functions[GC_DS4_SOURCE_LIBPAD_SYMBOLS] = {
         symbols->read_state, symbols->read_state_ext, symbols->read,
-        symbols->read_ext, symbols->data_internal, symbols->controller_info
+        symbols->read_ext, symbols->data_internal, symbols->controller_info,
+        symbols->set_vibration
     };
     memset(evidence, 0, sizeof(*evidence));
     evidence->firmware = kernel_get_fw_version();
-    for (size_t slot = 0; slot < GC_DS4_LIBPAD_SYMBOLS; ++slot) {
+    for (size_t slot = 0; slot < GC_DS4_SOURCE_LIBPAD_SYMBOLS; ++slot) {
         uint8_t code[256];
         if (functions[slot] > 0 &&
             gc_remote_read(pid, functions[slot], code, sizeof(code)) == 0) {
@@ -256,6 +258,7 @@ resolve_symbols(pid_t pid, GcDs4SourceSymbols *symbols)
     RESOLVE_PAD(read_ext, "scePadReadExt");
     RESOLVE_PAD(data_internal, "scePadGetDataInternal");
     RESOLVE_PAD(controller_info, "scePadGetControllerInformation");
+    RESOLVE_PAD(set_vibration, "scePadSetVibration");
 #undef RESOLVE_PAD
 
     symbols->usleep = gc_remote_resolve(pid, kernel, "usleep");
@@ -607,6 +610,45 @@ gc_ds4_source_snapshot(const GcDs4SourceReader *reader,
                bank->source_count * sizeof(snapshot->frames[0]));
         return 0;
     }
+    return -1;
+}
+
+int
+gc_ds4_source_set_vibration(const GcDs4SourceReader *reader,
+                            unsigned source_slot, uint8_t large, uint8_t small)
+{
+    typedef struct { uint8_t large_motor, small_motor; } GcDs4Vibration;
+    GcDs4SourceSymbols symbols;
+    GcRemoteSession session = {0};
+    uint32_t libpad = 0;
+    intptr_t set_vibration_mode;
+    int64_t mode_result = -1, vibration_result = -1;
+    if (!reader || source_slot >= reader->source_count || reader->pid <= 0 ||
+        kernel_get_proc(reader->pid) != reader->process_identity ||
+        resolve_symbols(reader->pid, &symbols) || !symbols.set_vibration ||
+        gc_remote_get_library(reader->pid, "libScePad", &libpad) ||
+        gc_remote_session_open(&session, reader->pid)) return -1;
+    set_vibration_mode = gc_remote_resolve(reader->pid, libpad,
+                                            "scePadSetVibrationMode");
+    if (!set_vibration_mode) goto failed;
+    GcDs4Source source = reader->sources[source_slot];
+    if (!source.identity_verified || !source.connected || source.pad_handle <= 0)
+        goto failed;
+    GcDs4Vibration vibration = {large, small};
+    const intptr_t scratch = reader->args_address + 0x3000;
+    if (gc_remote_write(reader->pid, scratch, &vibration, sizeof(vibration)) ||
+        remote_call(&session, set_vibration_mode,
+            (uint32_t)source.pad_handle, 2, 0, 0,
+            &mode_result) ||
+        remote_call(&session, symbols.set_vibration, (uint32_t)source.pad_handle,
+            (uint64_t)scratch, 0, 0, &vibration_result)) goto failed;
+    if (gc_remote_session_close(&session)) return -1;
+    source_log("rumble handle=0x%08x large=%u small=%u mode_rc=%lld set_rc=%lld\n",
+        (uint32_t)source.pad_handle, large, small,
+        (long long)mode_result, (long long)vibration_result);
+    return vibration_result == 0 ? 0 : -1;
+failed:
+    (void)gc_remote_session_close(&session);
     return -1;
 }
 
