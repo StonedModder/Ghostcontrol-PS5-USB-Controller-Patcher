@@ -46,6 +46,7 @@ https://github.com/user-attachments/assets/6583b1c2-3d3d-4f2e-9e79-689121fea4a3
 | Xbox Series X controller | GIP | 045e:… | ✅ Working ¹ (quick test) |
 | PowerA Xbox Series X EnWired (BDA) | GIP (IN 0x81 / OUT 0x01) | 20d6:200b | ✅ Working ¹ |
 | Generic GameCube-style USB pad (DragonRise / "Microntek USB Joystick") | HID | 0079:0006 | ✅ Working ¹ |
+| Generic N64-style USB pad ("SWITCH CO.,LTD.") | HID on PC, Switch Pro mode on PS5 | 0e6d:111d / 057e:2009 | ✅ Working ¹ |
 
 ¹ Tested on a PS5 launch ("fat") model, firmware 11.40.
 
@@ -76,6 +77,26 @@ The pad has no L1, L3, R3 or Share. Other DragonRise-based pads may number
 their buttons differently: run `tools/gcpad_capture.c` on Linux
 (`gcc -O2 -o gcpad_capture tools/gcpad_capture.c -lusb-1.0 && sudo ./gcpad_capture`)
 and adjust `GCPAD_BTN_MAP` in `payload/controller_gcpad.c`.
+
+### N64-style pad mapping
+
+This pad changes identity: on a PC it is a plain HID gamepad (`0e6d:111d`),
+on the PS5 it poses as a Switch Pro Controller (`057e:2009`). The payload
+recognises the Pro-mode version by its manufacturer string `SWITCH CO.,LTD.`,
+so genuine Pro Controllers and 8BitDo pads keep the standard Pro mapping.
+
+| N64 | PS5 |
+|-----|-----|
+| A / B | Cross / Square |
+| L / R / Z | L1 / R1 / R2 |
+| Start (tap) | Options (sent on release) |
+| Start + Z | PS button |
+| Start + B | Circle (back) |
+| C-up / down / left / right | Right stick |
+| Stick / D-pad | Left stick / D-pad |
+
+To map a different HID pad, `tools/pad_capture.c` works with any controller:
+`gcc -O2 -o tools/pad_capture tools/pad_capture.c -lusb-1.0 && sudo ./tools/pad_capture VID:PID [n64|gamecube|generic]`.
 
 ---
 

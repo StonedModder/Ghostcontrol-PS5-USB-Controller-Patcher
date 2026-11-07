@@ -44,6 +44,7 @@
 #include "controller_nintendo.h"
 #include "controller_xbox.h"
 #include "controller_gcpad.h"
+#include "controller_n64.h"
 #include "gip_detect.h"
 
 /* ── Logging ──────────────────────────────────────────────────────────── */
@@ -238,6 +239,26 @@ static const char *UGEN_PATHS[] = {
 #define USB_SHORT_XFER_OK 0x0004  /* from dev/usb/usbdi.h */
 #endif
 
+/* Read a USB string descriptor as ASCII into out (may be NULL) and log it. */
+static void probe_log_string(int fd, const char *path, const char *what, uint8_t idx,
+                             char *out, int outlen) {
+    if (out && outlen > 0) out[0] = 0;
+    if (!idx) { gp_log("probe: %s %s: (none)\n", path, what); return; }
+    uint8_t raw[128]; memset(raw,0,sizeof(raw));
+    struct usb_gen_descriptor gd; memset(&gd,0,sizeof(gd));
+    gd.ugd_data = raw; gd.ugd_maxlen = sizeof(raw); gd.ugd_string_index = idx;
+    gd.ugd_lang_id = 0x0409;
+    if (ioctl(fd, USB_GET_STRING_DESC, &gd) != 0) {
+        gp_log("probe: %s %s: read failed errno=%d\n", path, what, errno); return;
+    }
+    char s[64]; int n = 0;
+    for (int i = 2; i + 1 < (int)gd.ugd_actlen && n < (int)sizeof(s) - 1; i += 2)
+        s[n++] = (raw[i] >= 0x20 && raw[i] < 0x7f) ? (char)raw[i] : '?';
+    s[n] = 0;
+    gp_log("probe: %s %s: \"%s\"\n", path, what, s);
+    if (out && outlen > 0) { strncpy(out, s, (size_t)outlen - 1); out[outlen - 1] = 0; }
+}
+
 /* Read the active configuration descriptor with a standard GET_DESCRIPTOR
  * control request and check it for an Xbox One/Series (GIP) interface. */
 static int probe_is_gip(int fd, const char *path) {
@@ -289,7 +310,16 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
         struct usb_device_descriptor dd; memset(&dd,0,sizeof(dd));
         if (ioctl(fd,USB_GET_DEVICE_DESC,&dd)==0) {
             uint16_t dv = UGETW(dd.idVendor), dp = UGETW(dd.idProduct);
-            gp_log("probe: %s descriptor vid=%04x pid=%04x\n", path, dv, dp);
+            gp_log("probe: %s descriptor vid=%04x pid=%04x bcdDevice=%04x\n",
+                   path, dv, dp, UGETW(dd.bcdDevice));
+            char mfr[64];
+            probe_log_string(fd, path, "manufacturer", dd.iManufacturer, mfr, sizeof(mfr));
+            probe_log_string(fd, path, "product", dd.iProduct, NULL, 0);
+            if (dv==VID_SWITCH && strncmp(mfr, N64PRO_MANUFACTURER, strlen(N64PRO_MANUFACTURER))==0) {
+                /* N64-style pad posing as a Switch Pro Controller on consoles */
+                gp_log("probe: %s → N64-style pad in Switch Pro mode\n", path);
+                *out_vid=VID_SWITCH; *out_pid=PID_N64PRO; found=1; goto done;
+            }
             if (dv==VID_XBOX) {
                 gp_log("probe: %s → Xbox (by vendor ID)\n", path);
                 *out_vid=VID_XBOX; *out_pid=PID_XBOX; found=1; goto done;
@@ -297,6 +327,10 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
             if (dv==VID_SWITCH) {
                 gp_log("probe: %s → Nintendo (by vendor ID)\n", path);
                 *out_vid=VID_SWITCH; *out_pid=PID_SWITCH; found=1; goto done;
+            }
+            if (dv==VID_N64 && dp==PID_N64) {
+                gp_log("probe: %s → N64-style pad (by vendor ID)\n", path);
+                *out_vid=VID_N64; *out_pid=PID_N64; found=1; goto done;
             }
             if (dv==VID_GCPAD && dp==PID_GCPAD) {
                 gp_log("probe: %s → GameCube-style pad (by vendor ID)\n", path);
@@ -427,6 +461,7 @@ static void *usb_hid_thread(void *arg) {
     void    *buffers[1]; uint32_t lengths[1];
     int fd = -1, out_opened = 0;
     int usb_ready_notified = 0;
+    uint32_t hid_xfer_len = 64;   /* plain HID pads: exact IN packet size */
 
     gp_log("slot[%d] USB thread: %s VID=0x%04x PID=0x%04x\n",
            slot, dev_path, vid, pid);
@@ -484,8 +519,8 @@ static void *usb_hid_thread(void *arg) {
         goto main_loop;
     }
 
-    /* ── GameCube-style pad (DragonRise): IN only, no handshake ────────── */
-    if (pid == PID_GCPAD && vid == VID_GCPAD) {
+    /* ── Plain HID pads (GameCube-style, N64-style): IN only, no handshake ── */
+    if ((pid == PID_GCPAD && vid == VID_GCPAD) || (pid == PID_N64 && vid == VID_N64)) {
         int attempt;
         for (attempt = 0; attempt < 5; attempt++) {
             fd = open(dev_path, O_RDWR);
@@ -495,7 +530,7 @@ static void *usb_hid_thread(void *arg) {
             init.pEndpoints=eps; init.ep_index_max=1;
             if (ioctl(fd,USB_FS_INIT,&init)==0) {
                 memset(&fs_open,0,sizeof(fs_open));
-                fs_open.ep_index=0; fs_open.ep_no=GCPAD_EP_IN;
+                fs_open.ep_index=0; fs_open.ep_no=0x81;  /* GCPAD_EP_IN == N64_EP_IN */
                 fs_open.max_bufsize=64; fs_open.max_frames=1;
                 if (ioctl(fd,USB_FS_OPEN,&fs_open)==0) break;
                 memset(&uninit,0,sizeof(uninit)); ioctl(fd,USB_FS_UNINIT,&uninit);
@@ -505,10 +540,13 @@ static void *usb_hid_thread(void *arg) {
             usleep(50000);
         }
         if (fd < 0) { gp_log("slot[%d] gcpad give up\n", slot); goto exit_slot; }
-        gp_log("slot[%d] gcpad IN ep=0x%02x ok maxpkt=%u\n",
-               slot, GCPAD_EP_IN, (unsigned)fs_open.max_packet_length);
+        gp_log("slot[%d] HID pad IN ep=0x81 ok maxpkt=%u\n",
+               slot, (unsigned)fs_open.max_packet_length);
+        /* Reads must request exactly wMaxPacketSize (8 for gcpad, 64 for N64) */
+        hid_xfer_len = fs_open.max_packet_length;
+        if (hid_xfer_len == 0 || hid_xfer_len > 64) hid_xfer_len = 64;
 
-        buffers[0]=buf; lengths[0]=GCPAD_XFER_LEN;
+        buffers[0]=buf; lengths[0]=hid_xfer_len;
         eps[0].ppBuffer=buffers; eps[0].pLength=lengths; eps[0].nFrames=1;
         eps[0].timeout=100; eps[0].flags=USB_FS_FLAG_SINGLE_SHORT_OK|USB_FS_FLAG_MULTI_SHORT_OK;
         goto main_loop;
@@ -583,18 +621,20 @@ static void *usb_hid_thread(void *arg) {
     }
 
 main_loop: ;
-    int hs_state = (pid==PID_XBOX || pid==PID_GCPAD) ? HS_STREAMING : HS_WAIT_81_01;
-    uint8_t nintendo_seq = 1;
     const int is_gcpad = (pid == PID_GCPAD && vid == VID_GCPAD);
-    /* gcpad transfers run with a 100ms timeout, so wait up to ~120ms for COMPLETE */
-    const int cw_max = is_gcpad ? 240 : 60;
-    int gcpad_logged = 0;
+    const int is_n64   = (pid == PID_N64   && vid == VID_N64);
+    const int is_hid   = is_gcpad || is_n64;
+    int hs_state = (pid==PID_XBOX || is_hid) ? HS_STREAMING : HS_WAIT_81_01;
+    uint8_t nintendo_seq = 1;
+    /* HID pad transfers run with a 100ms timeout, so wait up to ~120ms for COMPLETE */
+    const int cw_max = is_hid ? 240 : 60;
+    int hid_logged = 0;
 
     while (1) {
         memset(buf,0,64);
-        /* The PS5 never completes a 64-byte read on the pad's 8-byte EP —
-         * gcpad reads must request exactly its packet size. */
-        buffers[0]=buf; lengths[0]= is_gcpad ? GCPAD_XFER_LEN : 64;
+        /* The PS5 never completes a 64-byte read on an 8-byte EP —
+         * plain HID pads must request exactly their packet size. */
+        buffers[0]=buf; lengths[0]= is_hid ? hid_xfer_len : 64;
         eps[0].ppBuffer=buffers; eps[0].pLength=lengths;
         eps[0].aFrames=0; eps[0].status=0;
 
@@ -633,15 +673,20 @@ main_loop: ;
 
         if (pid == PID_XBOX) {
             injected = xbox_handle_packet(fd, eps, buf, len, &pad);
-        } else if (is_gcpad) {
-            if (gcpad_logged < 3) {
-                gcpad_logged++;
-                gp_log("slot[%d] gcpad report: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                       slot, buf[0],buf[1],buf[2],buf[3],buf[4],buf[5],buf[6],buf[7]);
+        } else if (is_hid) {
+            if (hid_logged < 3) {
+                hid_logged++;
+                gp_log("slot[%d] HID pad report len=%u: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                       slot, (unsigned)len, buf[0],buf[1],buf[2],buf[3],buf[4],buf[5],buf[6],buf[7]);
             }
-            injected = gcpad_handle_packet(buf, len, &pad);
+            injected = is_n64 ? n64_handle_packet(buf, len, &pad)
+                              : gcpad_handle_packet(buf, len, &pad);
         } else {
             injected = nintendo_handle_packet(fd, eps, buf, len, &hs_state, &nintendo_seq, &pad);
+            /* N64-style pad in Pro mode: same handshake, its own button layout */
+            if (injected > 0 && pid == PID_N64PRO && len >= 12 &&
+                (buf[0] == 0x30 || buf[0] == 0x21 || buf[0] == 0x00))
+                n64pro_parse_0x30(buf, &pad);
         }
 
         if (injected > 0) {
@@ -731,9 +776,11 @@ static void *controller_manager_thread(void *arg) {
 
             const char *name =
                 (vid==VID_SWITCH && pid==PID_SWITCH) ? "Nintendo Switch Pro / 8BitDo" :
+                (vid==VID_SWITCH && pid==PID_N64PRO) ? "N64-style USB pad" :
                 (vid==VID_NATIVE && pid==PID_NATIVE) ? "8BitDo Native" :
                 (vid==VID_XBOX   && pid==PID_XBOX)   ? "Xbox controller" :
-                (vid==VID_GCPAD  && pid==PID_GCPAD)  ? "GameCube-style USB pad" : "Unknown";
+                (vid==VID_GCPAD  && pid==PID_GCPAD)  ? "GameCube-style USB pad" :
+                (vid==VID_N64    && pid==PID_N64)    ? "N64-style USB pad" : "Unknown";
 
             gp_log("manager: %s at %s → slot[%d]\n", name, path, slot);
             notify("Ghostcontrol: %s detected — assign user on screen", name);
