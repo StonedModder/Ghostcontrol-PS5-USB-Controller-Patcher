@@ -98,4 +98,40 @@ STUB int32_t gc_ds4_game_controller_info_stub(
     __atomic_fetch_add(&args->calls[5], 1, __ATOMIC_RELAXED);
     return 0;
 }
+
+STUB int32_t gc_ds4_game_set_vibration_stub(
+    int32_t handle, const void *parameter, GcDs4GameArgs *args)
+{
+    if (!args) return -1;
+    int32_t (*original)(int32_t, const void *) =
+        (void *)(uintptr_t)args->originals[6];
+    if (!original) return -1;
+    int32_t result = original(handle, parameter);
+    if (result || !parameter || !args || args->magic != GC_DS4_GAME_MAGIC ||
+        args->layout != GC_DS4_GAME_LAYOUT ||
+        !__atomic_load_n(&args->active, __ATOMIC_ACQUIRE)) return result;
+    const volatile uint8_t *vibration = parameter;
+    uint8_t large = vibration[0], small = vibration[1];
+    for (uint32_t route = 0; route < args->route_count; ++route) {
+        if (args->routes[route].pad_handle != handle) continue;
+        GcDs4GameRumble *state = &args->rumble[route];
+        for (unsigned attempt = 0; attempt < 8; ++attempt) {
+            uint32_t sequence = __atomic_load_n(&state->sequence, __ATOMIC_ACQUIRE);
+            if (sequence & 1u) continue;
+            if (__atomic_load_n(&state->large, __ATOMIC_RELAXED) == large &&
+                __atomic_load_n(&state->small, __ATOMIC_RELAXED) == small) break;
+            uint32_t writing = sequence + 1u;
+            if (!__atomic_compare_exchange_n(&state->sequence, &sequence, writing,
+                                              0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                continue;
+            __atomic_store_n(&state->large, large, __ATOMIC_RELAXED);
+            __atomic_store_n(&state->small, small, __ATOMIC_RELAXED);
+            __atomic_store_n(&state->sequence, writing + 1u, __ATOMIC_RELEASE);
+            __atomic_fetch_add(&args->calls[6], 1, __ATOMIC_RELAXED);
+            break;
+        }
+        break;
+    }
+    return result;
+}
 STUB void gc_ds4_game_stub_end(void) {}

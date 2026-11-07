@@ -58,6 +58,8 @@ static void publish_status(GcWirelessState *value, const char *message)
 
 static int stop_targets(void)
 {
+    for (unsigned slot = 0; slot < source.source_count; ++slot)
+        (void)gc_ds4_source_set_vibration(&source, slot, 0, 0);
     int game_result = gc_ds4_game_remove(&game);
     int source_result = gc_ds4_source_stop(&source);
     return game_result || source_result ? -1 : 0;
@@ -77,6 +79,25 @@ static int update_sources(const GcDs4SourceSnapshot *snapshot)
             source.sources[i] = snapshot->frames[i].source;
     }
     return changed;
+}
+
+static void forward_game_rumble(void)
+{
+    if (game.state != GC_DS4_GAME_LIVE) return;
+    for (unsigned route = 0; route < game.route_count; ++route) {
+        uint32_t sequence = 0;
+        uint8_t large = 0, small = 0;
+        if (gc_ds4_game_rumble(&game, route, &sequence, &large, &small) ||
+            !sequence || sequence == game.rumble_sequences[route]) continue;
+        unsigned source_slot = game.routes[route].source_slot;
+        if (gc_ds4_source_set_vibration(&source, source_slot, large, small)) {
+            ghostpad_status_log("[GC DS4] rumble relay failed route=%u source=%u seq=%u\n",
+                route, source_slot, sequence);
+        }
+        /* Avoid repeatedly attaching to RemotePlay for the same game value.
+         * A later game change, including zero to stop rumble, gets a new seq. */
+        game.rumble_sequences[route] = sequence;
+    }
 }
 
 static void *bridge_worker(void *unused)
@@ -194,6 +215,7 @@ static void *bridge_worker(void *unused)
                         } else ++health.publications;
                     }
                 }
+                forward_game_rumble();
             } else if (now_ns() > last_frame + UINT64_C(250000000)) {
                 (void)stop_targets(); source_live = 0;
                 message = "Wireless reader stalled; recovering";
@@ -213,7 +235,7 @@ static void *bridge_worker(void *unused)
             }
             if (game.state == GC_DS4_GAME_LIVE && !gc_ds4_game_status(&game, &target)) {
                 uint64_t calls = 0;
-                for (unsigned kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind) calls += target.calls[kind];
+                for (unsigned kind = 0; kind < GC_DS4_GAME_LIBPAD_SYMBOLS; ++kind) calls += target.calls[kind];
                 if (calls > health.gateway_calls) message = "Wireless DS4 input active";
                 health.gateway_calls = calls;
                 health.lease_expirations = target.lease_expirations;

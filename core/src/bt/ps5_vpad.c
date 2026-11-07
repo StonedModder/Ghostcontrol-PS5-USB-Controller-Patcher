@@ -209,19 +209,26 @@ static uint64_t hex_after(const char *s, const char *key)
     return v;
 }
 
-/* A virtual DualSense appearing:
- *   SCE_MBUS_EVENT_DEVICE_ADDED [DeviceId:0x...][type:1][subType:22]
- *   [capabilityBattery:0]...
- * A real pad reports a battery, so a line saying otherwise is not ours. */
+/* A virtual DualSense appearing. Firmware versions format the MBus event
+ * differently. Older versions use DeviceId/type/subType/capabilityBattery;
+ * newer versions use deviceId/deviceType/userId, for example:
+ *   event=DEVICE_ADDED deviceId=0x1f030d deviceType=22 userId=0x0(0)
+ * The real pad reports a battery in the older format, so exclude it there. */
 static uint64_t virtual_device_in(const char *line)
 {
     const char *bat;
+    uint64_t device_id;
+    int old_format, new_format;
 
-    if (!strstr(line, "DEVICE_ADDED") || !strstr(line, "type:1") || !strstr(line, "subType:22"))
+    if (!strstr(line, "DEVICE_ADDED"))
         return 0;
+    old_format = strstr(line, "type:1") && strstr(line, "subType:22");
+    new_format = hex_after(line, "deviceType=") == 22;
+    if (!old_format && !new_format) return 0;
     bat = strstr(line, "capabilityBattery:");
     if (bat && bat[18] != '0') return 0;
-    return hex_after(line, "DeviceId");
+    device_id = hex_after(line, old_format ? "DeviceId" : "deviceId=");
+    return device_id;
 }
 
 /* Reads what the log has, a bounded amount per call. */

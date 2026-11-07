@@ -9,12 +9,12 @@
 #include "gc_types.h"
 #include "gc_remote.h"
 
-#define GC_DS4_LIBPAD_SYMBOLS 6u
+#define GC_DS4_SOURCE_LIBPAD_SYMBOLS 7u
 
 typedef struct {
     uint32_t firmware;
     uint32_t fingerprint_mask;
-    uint64_t fingerprints[GC_DS4_LIBPAD_SYMBOLS];
+    uint64_t fingerprints[GC_DS4_SOURCE_LIBPAD_SYMBOLS];
     uint8_t controller_info_abi;
 } GcDs4LibpadEvidence;
 
@@ -52,6 +52,9 @@ int gc_ds4_source_start(const int32_t *user_ids, size_t user_count,
                         GcDs4SourceReader *reader);
 int gc_ds4_source_snapshot(const GcDs4SourceReader *reader,
                            GcDs4SourceSnapshot *snapshot);
+int gc_ds4_source_set_vibration(const GcDs4SourceReader *reader,
+                                unsigned source_slot, uint8_t large,
+                                uint8_t small);
 int gc_ds4_source_stop(GcDs4SourceReader *reader);
 int gc_ds4_source_heartbeat(const GcDs4SourceReader *reader);
 int gc_ds4_source_request_stop(const GcDs4SourceReader *reader);
