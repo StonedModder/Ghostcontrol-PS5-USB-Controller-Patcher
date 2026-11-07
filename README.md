@@ -43,14 +43,19 @@ https://github.com/user-attachments/assets/6583b1c2-3d3d-4f2e-9e79-689121fea4a3
 | 8BitDo Ultimate 2 | Native | 2dc8:310b | Untested |
 | Xbox One S / Series S controller | GIP (IN 0x82 / OUT 0x02) | 045e:02ea | ✅ Working |
 | Xbox One controller, original 2013 (model 1537) | GIP (IN 0x81 / OUT 0x01) | 045e:02dd | ✅ Working ¹ |
+| Xbox Series X controller | GIP | 045e:… | ✅ Working ¹ (quick test) |
+| PowerA Xbox Series X EnWired (BDA) | GIP (IN 0x81 / OUT 0x01) | 20d6:200b | ✅ Working ¹ |
 | Generic GameCube-style USB pad (DragonRise / "Microntek USB Joystick") | HID | 0079:0006 | ✅ Working ¹ |
 
 ¹ Tested on a PS5 launch ("fat") model, firmware 11.40.
 
-Controllers are identified by the vendor ID in their USB device descriptor
-(Microsoft `045e` → Xbox, Nintendo `057e` → Switch Pro, `0079:0006` →
-GameCube-style pad). If the descriptor can't be read, the payload falls back to
-guessing from endpoint shape. Look for the `probe:` lines in
+Controllers are identified in this order:
+1. Vendor ID from the USB device descriptor: Microsoft `045e` → Xbox,
+   Nintendo `057e` → Switch Pro, `0079:0006` → GameCube-style pad.
+2. Xbox One/Series (GIP) interface signature, class `ff` / subclass `47` /
+   protocol `d0`, so licensed third-party Xbox pads (PowerA, PDP, Hori, Razer…)
+   use the Xbox path without listing each vendor.
+3. Endpoint shape, as a last resort. Look for the `probe:` lines in
 `/data/ghostpad/gc_status.log` to see how a controller was identified.
 
 See `othercontrollersGuide.md` for adding new controllers.

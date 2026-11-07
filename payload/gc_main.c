@@ -44,6 +44,7 @@
 #include "controller_nintendo.h"
 #include "controller_xbox.h"
 #include "controller_gcpad.h"
+#include "gip_detect.h"
 
 /* ── Logging ──────────────────────────────────────────────────────────── */
 #define LOG_DIR  "/data/ghostpad"
@@ -233,6 +234,29 @@ static const char *UGEN_PATHS[] = {
 };
 #define N_UGEN_PATHS ((int)(sizeof(UGEN_PATHS)/sizeof(UGEN_PATHS[0])))
 
+#ifndef USB_SHORT_XFER_OK
+#define USB_SHORT_XFER_OK 0x0004  /* from dev/usb/usbdi.h */
+#endif
+
+/* Read the active configuration descriptor with a standard GET_DESCRIPTOR
+ * control request and check it for an Xbox One/Series (GIP) interface. */
+static int probe_is_gip(int fd, const char *path) {
+    uint8_t cd[512]; memset(cd,0,sizeof(cd));
+    struct usb_ctl_request cr; memset(&cr,0,sizeof(cr));
+    cr.ucr_data = cd;
+    cr.ucr_flags = USB_SHORT_XFER_OK;
+    cr.ucr_request.bmRequestType = 0x80;   /* device-to-host, standard, device */
+    cr.ucr_request.bRequest = 0x06;        /* GET_DESCRIPTOR */
+    USETW(cr.ucr_request.wValue, 0x0200);  /* CONFIGURATION, index 0 */
+    USETW(cr.ucr_request.wIndex, 0);
+    USETW(cr.ucr_request.wLength, sizeof(cd));
+    if (ioctl(fd, USB_DO_REQUEST, &cr) != 0) {
+        gp_log("probe: %s config descriptor read failed errno=%d\n", path, errno);
+        return 0;
+    }
+    return gip_cdesc_has_gip_iface(cd, cr.ucr_actlen);
+}
+
 /* Probe one ugen2.x path to identify controller type.
  * Returns 1 with vid/pid set, 0 if not a known controller.
  * Skips non-ugen2 paths (not on external USB bus). */
@@ -278,10 +302,17 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
                 gp_log("probe: %s → GameCube-style pad (by vendor ID)\n", path);
                 *out_vid=VID_GCPAD; *out_pid=PID_GCPAD; found=1; goto done;
             }
-            /* Unknown vendor: fall through to the endpoint rules */
+            /* Unknown vendor: try the GIP signature, then the endpoint rules */
         } else {
-            gp_log("probe: %s descriptor read failed errno=%d — using endpoint rules\n", path, errno);
+            gp_log("probe: %s descriptor read failed errno=%d\n", path, errno);
         }
+    }
+
+    /* Third-party Xbox One/Series pads (PowerA, PDP, Hori...) have their own
+     * vendor IDs but share the GIP interface signature ff/47/d0. */
+    if (probe_is_gip(fd, path)) {
+        gp_log("probe: %s → Xbox (GIP interface ff/47/d0)\n", path);
+        *out_vid=VID_XBOX; *out_pid=PID_XBOX; found=1; goto done;
     }
 
     /* ep=0x81: maxpkt=64 → Nintendo, maxpkt=8 → DragonRise GameCube-style pad */
