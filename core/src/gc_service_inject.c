@@ -259,7 +259,18 @@ static int usb_release_fd(UsbFeed *feed)
     if (feed->fs_initialized) {
         struct usb_fs_uninit un;
         memset(&un, 0, sizeof un);
-        if (ioctl(feed->fd, USB_FS_UNINIT, &un) != 0) return -1;
+        if (ioctl(feed->fd, USB_FS_UNINIT, &un) != 0) {
+            const int err = errno;
+            /* An unplugged device can never be uninitialised; failing here
+             * left the feed open forever (retired every tick, and a replug
+             * was never picked up). The kernel releases the endpoints when
+             * the handle is closed, so carry on to close() in that case. */
+            if (err != ENXIO && err != ENODEV && err != ENOTTY) return -1;
+            static int noted_gone;
+            if (noted_gone++ < 4)
+                fprintf(stderr, "inject: usb %s FS_UNINIT errno=%d: device gone, closing handle\n",
+                        feed->path, err);
+        }
         feed->fs_initialized = 0;
     }
     if (close(feed->fd) != 0) { feed->close_uncertain = 1; return -1; }
