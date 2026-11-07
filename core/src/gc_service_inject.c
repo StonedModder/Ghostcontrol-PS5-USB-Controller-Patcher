@@ -1282,8 +1282,8 @@ static void usb_tick(void)
                 memset(reply, 0, sizeof reply);
                 poll.ucr_data = reply;
                 poll.ucr_flags = USB_SHORT_XFER_OK;
-                poll.ucr_request.bmRequestType = 0x81;      /* device to host, class */
-                poll.ucr_request.bRequest = 6;              /* GET_REPORT */
+                poll.ucr_request.bmRequestType = 0xA1;      /* device to host, class, interface */
+                poll.ucr_request.bRequest = 0x01;           /* HID GET_REPORT */
                 USETW(poll.ucr_request.wValue, (uint16_t)(0x0100u | report_id));
                 USETW(poll.ucr_request.wIndex, (uint16_t)devices[i].interface_number);
                 USETW(poll.ucr_request.wLength, (uint16_t)sizeof reply);
@@ -1293,7 +1293,12 @@ static void usb_tick(void)
                 if (noted++ < 4)
                     log_line("usb: %s GET_REPORT id=%#x rc=%d actlen=%d errno=%d",
                              devices[i].path, report_id, rc, poll.ucr_actlen, poll_errno);
-                if (rc == 0 &&
+                /* Some pads answer GET_REPORT with all zeros until they stream;
+                 * decoded, that reads as a held D-pad and pinned sticks. */
+                int reply_nonzero = 0;
+                for (int k = 0; rc == 0 && k < poll.ucr_actlen && k < (int)sizeof reply; ++k)
+                    reply_nonzero |= reply[k];
+                if (rc == 0 && reply_nonzero &&
                     poll.ucr_actlen > 0 && (size_t)poll.ucr_actlen <= sizeof reply) {
                     memcpy(feed->report, reply, (size_t)poll.ucr_actlen);
                     feed->lenp = (uint32_t)poll.ucr_actlen;
