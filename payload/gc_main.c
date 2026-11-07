@@ -45,6 +45,7 @@
 #include "controller_xbox.h"
 #include "controller_gcpad.h"
 #include "controller_n64.h"
+#include "controller_ds4.h"
 #include "gip_detect.h"
 
 /* ── Logging ──────────────────────────────────────────────────────────── */
@@ -279,6 +280,49 @@ static int probe_is_gip(int fd, const char *path, int quiet) {
     return gip_cdesc_has_gip_iface(cd, cr.ucr_actlen);
 }
 
+/* ── Settings: /data/ghostpad/config.ini ─────────────────────────────── */
+#define CONFIG_PATH "/data/ghostpad/config.ini"
+#define DEFAULT_CONFIG_TEXT \
+    "# Ghostcontrol settings - edit over FTP, then restart the payload.\n" \
+    "#\n" \
+    "# ds4 = native   : leave a USB PS4 controller to the PS5 (default;\n" \
+    "#                  works in PS4 games and menus)\n" \
+    "# ds4 = takeover : EXPERIMENTAL - present it as a virtual DualSense for\n" \
+    "#                  PS5 games. The PS5 currently fights this: expect\n" \
+    "#                  resets, or a connection that does nothing.\n" \
+    "ds4=native\n"
+/* DS4 takeover is EXPERIMENTAL: the PS5 fights it (device resets, or a
+ * stable connection whose input the PS5 ignores). Default: leave it native. */
+static int g_ds4_takeover = 0;
+
+static void load_config(void) {
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (!f) {
+        f = fopen(CONFIG_PATH, "w");
+        if (f) {
+            fputs(DEFAULT_CONFIG_TEXT, f);
+            fclose(f);
+        }
+        gp_log("config: %s created with defaults (ds4=native)\n", CONFIG_PATH);
+        return;
+    }
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char key[32], val[32];
+        char *p = line; while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == ';' || *p == '\n' || *p == 0) continue;
+        if (sscanf(p, " %31[^= \t] = %31s", key, val) != 2) continue;
+        if (strcmp(key, "ds4") == 0) {
+            if (strcmp(val, "native") == 0) g_ds4_takeover = 0;
+            else if (strcmp(val, "takeover") == 0) g_ds4_takeover = 1;
+            else gp_log("config: unknown ds4 value \"%s\" — keeping %s\n",
+                        val, g_ds4_takeover ? "takeover" : "native");
+        }
+    }
+    fclose(f);
+    gp_log("config: ds4=%s\n", g_ds4_takeover ? "takeover" : "native");
+}
+
 /* Per-path "already logged as unsupported" key (vid<<16|pid), to keep the
  * log quiet while an unsupported device stays plugged in. */
 static uint32_t g_probe_seen[N_UGEN_PATHS];
@@ -353,6 +397,15 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
             if (dv==VID_N64 && dp==PID_N64) {
                 gp_log("probe: %s → N64-style pad (by vendor ID)\n", path);
                 *out_vid=VID_N64; *out_pid=PID_N64; found=1; goto done;
+            }
+            if (ds4_is_ds4(dv, dp)) {
+                if (g_ds4_takeover) {
+                    gp_log("probe: %s → PS4 controller (DualShock 4), taking over\n", path);
+                    *out_vid=VID_SONY; *out_pid=PID_DS4; found=1; goto done;
+                }
+                if (!quiet) gp_log("probe: %s PS4 controller left native (ds4=native)\n", path);
+                probe_seen_set(path, ((uint32_t)dv << 16) | dp);
+                goto done;
             }
             if (dv==VID_GCPAD && dp==PID_GCPAD) {
                 gp_log("probe: %s → GameCube-style pad (by vendor ID)\n", path);
@@ -497,6 +550,7 @@ static void *usb_hid_thread(void *arg) {
     void    *buffers[1]; uint32_t lengths[1];
     int fd = -1, out_opened = 0;
     int usb_ready_notified = 0;
+    struct timeval t_session; gettimeofday(&t_session, NULL);
     uint32_t hid_xfer_len = 64;   /* plain HID pads: exact IN packet size */
 
     gp_log("slot[%d] USB thread: %s VID=0x%04x PID=0x%04x\n",
@@ -552,6 +606,45 @@ static void *usb_hid_thread(void *arg) {
         gp_log("slot[%d] Xbox OUT ep=0x%02x opened=%d\n", slot, xout, out_opened);
 
         xbox_gip_handshake(fd, eps);
+        goto main_loop;
+    }
+
+    /* ── DualShock 4: HID on interface 3, IN 0x84, no handshake ─────────── */
+    if (vid == VID_SONY && pid == PID_DS4) {
+        int attempt;
+        for (attempt = 0; attempt < 5; attempt++) {
+            fd = open(dev_path, O_RDWR);
+            if (fd < 0) { gp_log("slot[%d] DS4 open fail errno=%d\n", slot, errno); goto exit_slot; }
+            /* Detach all four interfaces (0-2 headset audio, 3 controller).
+             * Leaving the audio attached kept the PS5 treating the device as
+             * its native PS4 controller, and the virtual DualSense got no
+             * assignment prompt and no effect. */
+            { int ii; for (ii = 0; ii <= DS4_IFACE; ii++) {
+                  int i2 = ii; int r = ioctl(fd,USB_IFACE_DRIVER_DETACH,&i2);
+                  if (attempt == 0) gp_log("slot[%d] DS4 detach iface%d ret=%d errno=%d\n",
+                                           slot, ii, r, r ? errno : 0); } }
+            memset(eps,0,sizeof(eps)); memset(&init,0,sizeof(init));
+            init.pEndpoints=eps; init.ep_index_max=1;
+            if (ioctl(fd,USB_FS_INIT,&init)==0) {
+                memset(&fs_open,0,sizeof(fs_open));
+                fs_open.ep_index=0; fs_open.ep_no=DS4_EP_IN;
+                fs_open.max_bufsize=64; fs_open.max_frames=1;
+                if (ioctl(fd,USB_FS_OPEN,&fs_open)==0) break;
+                memset(&uninit,0,sizeof(uninit)); ioctl(fd,USB_FS_UNINIT,&uninit);
+            }
+            gp_log("slot[%d] DS4 OPEN retry %d errno=%d\n", slot, attempt, errno);
+            close(fd); fd=-1;
+            usleep(50000);
+        }
+        if (fd < 0) { gp_log("slot[%d] DS4 give up\n", slot); goto exit_slot; }
+        gp_log("slot[%d] DS4 IN ep=0x%02x ok maxpkt=%u\n",
+               slot, DS4_EP_IN, (unsigned)fs_open.max_packet_length);
+        hid_xfer_len = fs_open.max_packet_length;
+        if (hid_xfer_len == 0 || hid_xfer_len > 64) hid_xfer_len = 64;
+
+        buffers[0]=buf; lengths[0]=hid_xfer_len;
+        eps[0].ppBuffer=buffers; eps[0].pLength=lengths; eps[0].nFrames=1;
+        eps[0].timeout=100; eps[0].flags=USB_FS_FLAG_SINGLE_SHORT_OK|USB_FS_FLAG_MULTI_SHORT_OK;
         goto main_loop;
     }
 
@@ -659,14 +752,43 @@ static void *usb_hid_thread(void *arg) {
 main_loop: ;
     const int is_gcpad = (pid == PID_GCPAD && vid == VID_GCPAD);
     const int is_n64   = (pid == PID_N64   && vid == VID_N64);
-    const int is_hid   = is_gcpad || is_n64;
+    const int is_ds4   = (vid == VID_SONY && pid == PID_DS4);
+    const int is_hid   = is_gcpad || is_n64 || is_ds4;
     int hs_state = (pid==PID_XBOX || is_hid) ? HS_STREAMING : HS_WAIT_81_01;
     uint8_t nintendo_seq = 1;
     /* HID pad transfers run with a 100ms timeout, so wait up to ~120ms for COMPLETE */
     const int cw_max = is_hid ? 240 : 60;
     int hid_logged = 0;
+    struct timeval ds4_tcheck; gettimeofday(&ds4_tcheck, NULL);   /* DIAG (DS4 resets) */
 
     while (1) {
+        /* DIAG: once a second, see whether a PS5 driver has re-attached to the
+         * DS4's interfaces; if iface 3 is reclaimed, log it and detach again. */
+        if (is_ds4) {
+            struct timeval tn; gettimeofday(&tn, NULL);
+            if (tn.tv_sec != ds4_tcheck.tv_sec) {
+                ds4_tcheck = tn;
+                long el = (long)(tn.tv_sec - t_session.tv_sec);
+                for (int ifc = 0; ifc <= DS4_IFACE; ifc++) {
+                    int i2 = ifc;
+                    if (ioctl(fd, USB_IFACE_DRIVER_ACTIVE, &i2) == 0) {
+                        char name[64]; memset(name, 0, sizeof(name));
+                        struct usb_gen_descriptor gd; memset(&gd, 0, sizeof(gd));
+                        gd.ugd_data = name; gd.ugd_maxlen = sizeof(name) - 1; gd.ugd_iface_index = (uint8_t)ifc;
+                        ioctl(fd, USB_GET_IFACE_DRIVER, &gd);
+                        int i3 = ifc; int r = ioctl(fd, USB_IFACE_DRIVER_DETACH, &i3);
+                        gp_log("slot[%d] DS4 t=%lds: driver \"%s\" re-attached to iface%d — re-detach ret=%d\n",
+                               slot, el, name, ifc, r);
+                    }
+                }
+                if (el % 20 == 0) {   /* periodic snapshot of all four interfaces */
+                    int a[4];
+                    for (int ifc = 0; ifc < 4; ifc++) { int i2 = ifc; a[ifc] = (ioctl(fd, USB_IFACE_DRIVER_ACTIVE, &i2) == 0); }
+                    gp_log("slot[%d] DS4 t=%lds: drivers active iface0-3 = %d%d%d%d\n",
+                           slot, el, a[0], a[1], a[2], a[3]);
+                }
+            }
+        }
         memset(buf,0,64);
         /* The PS5 never completes a 64-byte read on an 8-byte EP —
          * plain HID pads must request exactly their packet size. */
@@ -715,7 +837,8 @@ main_loop: ;
                 gp_log("slot[%d] HID pad report len=%u: %02x %02x %02x %02x %02x %02x %02x %02x\n",
                        slot, (unsigned)len, buf[0],buf[1],buf[2],buf[3],buf[4],buf[5],buf[6],buf[7]);
             }
-            injected = is_n64 ? n64_handle_packet(buf, len, &pad)
+            injected = is_ds4 ? ds4_handle_packet(buf, len, &pad)
+                     : is_n64 ? n64_handle_packet(buf, len, &pad)
                               : gcpad_handle_packet(buf, len, &pad);
         } else {
             injected = nintendo_handle_packet(fd, eps, buf, len, &hs_state, &nintendo_seq, &pad);
@@ -742,6 +865,8 @@ main_loop: ;
     }
 
 reinit:
+    { struct timeval tn; gettimeofday(&tn, NULL);
+      gp_log("slot[%d] session lasted %lds\n", slot, (long)(tn.tv_sec - t_session.tv_sec)); }
     if (usb_ready_notified) { notify("Ghostcontrol: slot[%d] controller disconnected", slot); usb_ready_notified=0; }
     memset(&stop,0,sizeof(stop)); stop.ep_index=0; ioctl(fd,USB_FS_STOP,&stop);
     if (out_opened) {
@@ -816,7 +941,8 @@ static void *controller_manager_thread(void *arg) {
                 (vid==VID_NATIVE && pid==PID_NATIVE) ? "8BitDo Native" :
                 (vid==VID_XBOX   && pid==PID_XBOX)   ? "Xbox controller" :
                 (vid==VID_GCPAD  && pid==PID_GCPAD)  ? "GameCube-style USB pad" :
-                (vid==VID_N64    && pid==PID_N64)    ? "N64-style USB pad" : "Unknown";
+                (vid==VID_N64    && pid==PID_N64)    ? "N64-style USB pad" :
+                (vid==VID_SONY   && pid==PID_DS4)    ? "PS4 controller" : "Unknown";
 
             gp_log("manager: %s at %s → slot[%d]\n", name, path, slot);
             notify("Ghostcontrol: %s detected — assign user on screen", name);
@@ -940,6 +1066,8 @@ int main(void) {
       int pfd2=open(PID_PATH,O_WRONLY|O_CREAT|O_TRUNC,0600);
       if(pfd2>=0){char pb[16];snprintf(pb,sizeof(pb),"%d",getpid());write(pfd2,pb,strlen(pb));close(pfd2);}
     }
+
+    load_config();
 
     /* Init slots */
     for (int s = 0; s < MAX_SLOTS; s++) {
