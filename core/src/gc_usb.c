@@ -83,6 +83,55 @@ static int read_hid_layout(int fd, int interface_index, uint8_t interface_number
     return parsed == 0 ? 0 : -1;
 }
 
+/* The scan runs several times a second, and read_hid_layout() fetches the
+ * report descriptor from the device every time. Some pads treat each fetch
+ * as a fresh host setup: a generic N64-style pad that enumerates as a Switch
+ * Pro Controller (057e:2009) restarted its 0x81 handshake on every scan and
+ * never streamed. Keep the parsed layout while the same device stays on the
+ * same node; a different device or descriptor length is read afresh. */
+#define HID_LAYOUT_CACHE 8
+static struct {
+    int used;
+    char path[32];
+    uint16_t vid, pid, report_length;
+    int interface_index;
+    GcHidLayout layout;
+} hid_layout_cache[HID_LAYOUT_CACHE];
+static unsigned hid_layout_cache_next;
+
+static int read_hid_layout_cached(int fd, const char *path, uint16_t vid, uint16_t pid,
+                                  int interface_index, uint8_t interface_number,
+                                  uint16_t report_length, GcHidLayout *layout)
+{
+    for (unsigned i = 0; i < HID_LAYOUT_CACHE; ++i) {
+        if (hid_layout_cache[i].used && hid_layout_cache[i].vid == vid &&
+            hid_layout_cache[i].pid == pid &&
+            hid_layout_cache[i].interface_index == interface_index &&
+            hid_layout_cache[i].report_length == report_length &&
+            !strcmp(hid_layout_cache[i].path, path)) {
+            *layout = hid_layout_cache[i].layout;
+            return 0;
+        }
+    }
+    if (read_hid_layout(fd, interface_index, interface_number, report_length, layout) != 0)
+        return -1;
+    unsigned slot = HID_LAYOUT_CACHE;
+    for (unsigned i = 0; i < HID_LAYOUT_CACHE && slot == HID_LAYOUT_CACHE; ++i)
+        if (hid_layout_cache[i].used && !strcmp(hid_layout_cache[i].path, path) &&
+            hid_layout_cache[i].interface_index == interface_index)
+            slot = i;                     /* same node, different device: replace */
+    if (slot == HID_LAYOUT_CACHE)
+        slot = hid_layout_cache_next++ % HID_LAYOUT_CACHE;
+    hid_layout_cache[slot].used = 1;
+    snprintf(hid_layout_cache[slot].path, sizeof(hid_layout_cache[slot].path), "%s", path);
+    hid_layout_cache[slot].vid = vid;
+    hid_layout_cache[slot].pid = pid;
+    hid_layout_cache[slot].report_length = report_length;
+    hid_layout_cache[slot].interface_index = interface_index;
+    hid_layout_cache[slot].layout = *layout;
+    return 0;
+}
+
 static void select_candidate(GcUsbDevice *device, const GcUsbCandidate *candidate)
 {
     /* Replace every candidate-owned field together; endpoints and HID layout
@@ -190,8 +239,8 @@ int gc_usb_inspect_matching(const char *path, GcUsbInterfaceKind required_kind,
             }
             int hid_valid = 0;
             if (d[5] == 3 && d[6] != 1 && d[3] == 0)
-                hid_valid = read_hid_layout(fd, index, d[2],
-                    hid_report_length, &candidate.layout) == 0;
+                hid_valid = read_hid_layout_cached(fd, path, device->vid, device->pid,
+                    index, d[2], hid_report_length, &candidate.layout) == 0;
             candidate.kind = gc_usb_classify_interface(
                 d[5], d[6], d[7], d[3], hid_valid);
             int eligible = candidate.kind != GC_USB_INTERFACE_NONE &&
