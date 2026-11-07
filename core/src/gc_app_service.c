@@ -1135,7 +1135,9 @@ int main(int argc,char **argv)
         }
         pthread_mutex_unlock(&s->mutex);
 #endif
-        struct timespec pause={0,32000000}; nanosleep(&pause,NULL);
+        /* Each pass reads at most one report per USB pad, so the pause bounds
+         * input latency: 32 ms (~31 Hz) made a 250 Hz DualShock 4 feel laggy. */
+        struct timespec pause={0,8000000}; nanosleep(&pause,NULL);
     }
     if(app_close_checked(s)) {
         /* Returning from main would release the lease via CRT/process exit.
