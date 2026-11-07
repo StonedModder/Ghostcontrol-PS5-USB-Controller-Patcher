@@ -258,6 +258,32 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
 
     int found = 0;
 
+    /* Identify by vendor ID from the device descriptor when the PS5 allows it.
+     * Endpoint shape alone is ambiguous: some Xbox pads also have a 64-byte
+     * IN at 0x81, which the endpoint rules below would call "Nintendo". */
+    {
+        struct usb_device_descriptor dd; memset(&dd,0,sizeof(dd));
+        if (ioctl(fd,USB_GET_DEVICE_DESC,&dd)==0) {
+            uint16_t dv = UGETW(dd.idVendor), dp = UGETW(dd.idProduct);
+            gp_log("probe: %s descriptor vid=%04x pid=%04x\n", path, dv, dp);
+            if (dv==VID_XBOX) {
+                gp_log("probe: %s → Xbox (by vendor ID)\n", path);
+                *out_vid=VID_XBOX; *out_pid=PID_XBOX; found=1; goto done;
+            }
+            if (dv==VID_SWITCH) {
+                gp_log("probe: %s → Nintendo (by vendor ID)\n", path);
+                *out_vid=VID_SWITCH; *out_pid=PID_SWITCH; found=1; goto done;
+            }
+            if (dv==VID_GCPAD && dp==PID_GCPAD) {
+                gp_log("probe: %s → GameCube-style pad (by vendor ID)\n", path);
+                *out_vid=VID_GCPAD; *out_pid=PID_GCPAD; found=1; goto done;
+            }
+            /* Unknown vendor: fall through to the endpoint rules */
+        } else {
+            gp_log("probe: %s descriptor read failed errno=%d — using endpoint rules\n", path, errno);
+        }
+    }
+
     /* ep=0x81: maxpkt=64 → Nintendo, maxpkt=8 → DragonRise GameCube-style pad */
     po.ep_no=0x81;
     if (ioctl(fd,USB_FS_OPEN,&po)==0) {
@@ -388,25 +414,40 @@ static void *usb_hid_thread(void *arg) {
             close(fd); goto exit_slot;
         }
 
-        memset(&fs_open,0,sizeof(fs_open));
-        fs_open.ep_index=0; fs_open.ep_no=XBOX_EP_IN;
-        fs_open.max_bufsize=64; fs_open.max_frames=1;
-        if (ioctl(fd,USB_FS_OPEN,&fs_open)!=0){
-            gp_log("slot[%d] Xbox IN fail errno=%d\n",slot,errno);
+        /* Xbox pads use IN 0x82/OUT 0x02 (One S) or IN 0x81/OUT 0x01 (others) */
+        int xin = -1;
+        { static const uint8_t ins[2] = { XBOX_EP_IN, 0x81 };
+          for (int k = 0; k < 2 && xin < 0; k++) {
+              memset(&fs_open,0,sizeof(fs_open));
+              fs_open.ep_index=0; fs_open.ep_no=ins[k];
+              fs_open.max_bufsize=64; fs_open.max_frames=1;
+              if (ioctl(fd,USB_FS_OPEN,&fs_open)==0) xin = ins[k];
+          } }
+        if (xin < 0){
+            gp_log("slot[%d] Xbox IN fail (0x82 and 0x81) errno=%d\n",slot,errno);
             goto uninit_exit;
         }
         gp_log("slot[%d] Xbox IN ep=0x%02x ok maxpkt=%u\n",
-               slot, XBOX_EP_IN, (unsigned)fs_open.max_packet_length);
+               slot, xin, (unsigned)fs_open.max_packet_length);
 
         buffers[0]=buf; lengths[0]=64;
         eps[0].ppBuffer=buffers; eps[0].pLength=lengths; eps[0].nFrames=1;
         eps[0].timeout=50; eps[0].flags=USB_FS_FLAG_SINGLE_SHORT_OK|USB_FS_FLAG_MULTI_SHORT_OK;
 
+        /* OUT endpoint matches the IN number (0x82→0x02, 0x81→0x01); try both */
+        int xout = (xin == 0x81) ? 0x01 : XBOX_EP_OUT;
         memset(&fs_open,0,sizeof(fs_open));
-        fs_open.ep_index=1; fs_open.ep_no=XBOX_EP_OUT;
+        fs_open.ep_index=1; fs_open.ep_no=xout;
         fs_open.max_bufsize=64; fs_open.max_frames=1;
         out_opened = (ioctl(fd,USB_FS_OPEN,&fs_open)==0) ? 1 : 0;
-        gp_log("slot[%d] Xbox OUT ep=0x%02x opened=%d\n", slot, XBOX_EP_OUT, out_opened);
+        if (!out_opened) {
+            xout = (xout == 0x01) ? XBOX_EP_OUT : 0x01;
+            memset(&fs_open,0,sizeof(fs_open));
+            fs_open.ep_index=1; fs_open.ep_no=xout;
+            fs_open.max_bufsize=64; fs_open.max_frames=1;
+            out_opened = (ioctl(fd,USB_FS_OPEN,&fs_open)==0) ? 1 : 0;
+        }
+        gp_log("slot[%d] Xbox OUT ep=0x%02x opened=%d\n", slot, xout, out_opened);
 
         xbox_gip_handshake(fd, eps);
         goto main_loop;
@@ -660,7 +701,7 @@ static void *controller_manager_thread(void *arg) {
             const char *name =
                 (vid==VID_SWITCH && pid==PID_SWITCH) ? "Nintendo Switch Pro / 8BitDo" :
                 (vid==VID_NATIVE && pid==PID_NATIVE) ? "8BitDo Native" :
-                (vid==VID_XBOX   && pid==PID_XBOX)   ? "Xbox One S" :
+                (vid==VID_XBOX   && pid==PID_XBOX)   ? "Xbox controller" :
                 (vid==VID_GCPAD  && pid==PID_GCPAD)  ? "GameCube-style USB pad" : "Unknown";
 
             gp_log("manager: %s at %s → slot[%d]\n", name, path, slot);

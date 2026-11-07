@@ -41,7 +41,17 @@ https://github.com/user-attachments/assets/6583b1c2-3d3d-4f2e-9e79-689121fea4a3
 |-----------|------|---------|--------|
 | 8BitDo Ultimate 2 | Nintendo Switch Pro | 057e:2009 | ✅ Working |
 | 8BitDo Ultimate 2 | Native | 2dc8:310b | Untested |
-| Generic GameCube-style USB pad (DragonRise / "Microntek USB Joystick") | HID | 0079:0006 | ✅ Working |
+| Xbox One S / Series S controller | GIP (IN 0x82 / OUT 0x02) | 045e:02ea | ✅ Working |
+| Xbox One controller, original 2013 (model 1537) | GIP (IN 0x81 / OUT 0x01) | 045e:02dd | ✅ Working ¹ |
+| Generic GameCube-style USB pad (DragonRise / "Microntek USB Joystick") | HID | 0079:0006 | ✅ Working ¹ |
+
+¹ Tested on a PS5 launch ("fat") model, firmware 11.40.
+
+Controllers are identified by the vendor ID in their USB device descriptor
+(Microsoft `045e` → Xbox, Nintendo `057e` → Switch Pro, `0079:0006` →
+GameCube-style pad). If the descriptor can't be read, the payload falls back to
+guessing from endpoint shape. Look for the `probe:` lines in
+`/data/ghostpad/gc_status.log` to see how a controller was identified.
 
 See `othercontrollersGuide.md` for adding new controllers.
 
