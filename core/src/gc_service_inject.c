@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -1181,6 +1182,12 @@ static void usb_tick(void)
         }
     }
     for (i = 0; i < count; ++i) {
+        /* The descriptor scan also returns unqualified raw HID interfaces so
+         * protocol-specific handlers can inspect them. They are not sources
+         * this service can open. Skipping them here avoids reporting a stale
+         * errno as an open failure on every USB scan (and rotating vpad.log
+         * with noise from unrelated devices). */
+        if (!usb_supported(&devices[i])) continue;
         int have = 0;
         UsbFeed *feed = NULL;
         struct usb_fs_start st;
@@ -1308,6 +1315,30 @@ static void usb_tick(void)
                 continue;
             }
         }
+        /* ugen completes an asynchronous transfer only after its descriptor
+         * becomes pollable. Calling USB_FS_COMPLETE immediately after START
+         * races the transfer and returns EBUSY on some devices; the next tick
+         * then repeats the same failed completion. Match the resident reader's
+         * canonical START -> poll -> COMPLETE sequence, using a zero timeout
+         * because this function is shared with the app-service tick loop. */
+        struct pollfd ready;
+        memset(&ready, 0, sizeof ready);
+        ready.fd = feed->fd;
+        ready.events = POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM;
+        int polled = poll(&ready, 1, 0);
+        if (polled < 0) {
+            int err = errno;
+            if (err == EINTR) continue;
+            static int noted_poll;
+            if (noted_poll++ < 4)
+                log_line("usb: %s poll failed errno=%d (%s)",
+                         feed->path, err, strerror(err));
+            if (usb_note_io(feed, err, 0, 0)) continue;
+            continue;
+        }
+        if (polled == 0 || !(ready.revents & (POLLIN | POLLOUT | POLLRDNORM |
+                                               POLLWRNORM | POLLERR | POLLHUP | POLLNVAL)))
+            continue;
         memset(&done, 0, sizeof done);
         if (ioctl(feed->fd, USB_FS_COMPLETE, &done) != 0) {
             int err = errno;
