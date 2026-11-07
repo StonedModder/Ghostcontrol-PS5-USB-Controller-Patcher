@@ -46,6 +46,7 @@
 #include "controller_gcpad.h"
 #include "controller_n64.h"
 #include "controller_ds4.h"
+#include "controller_ds3.h"
 #include "gip_detect.h"
 
 /* ── Logging ──────────────────────────────────────────────────────────── */
@@ -263,6 +264,21 @@ static void probe_log_string(int fd, const char *path, const char *what, uint8_t
 
 /* Read the active configuration descriptor with a standard GET_DESCRIPTOR
  * control request and check it for an Xbox One/Series (GIP) interface. */
+/* Standard/class control request on EP0. Returns bytes transferred or -1. */
+static int usb_ctrl(int fd, uint8_t type, uint8_t req, uint16_t val, uint16_t idx,
+                    void *data, uint16_t len) {
+    struct usb_ctl_request cr; memset(&cr,0,sizeof(cr));
+    cr.ucr_data = data;
+    cr.ucr_flags = USB_SHORT_XFER_OK;
+    cr.ucr_request.bmRequestType = type;
+    cr.ucr_request.bRequest = req;
+    USETW(cr.ucr_request.wValue, val);
+    USETW(cr.ucr_request.wIndex, idx);
+    USETW(cr.ucr_request.wLength, len);
+    if (ioctl(fd, USB_DO_REQUEST, &cr) != 0) return -1;
+    return cr.ucr_actlen;
+}
+
 static int probe_is_gip(int fd, const char *path, int quiet) {
     uint8_t cd[512]; memset(cd,0,sizeof(cd));
     struct usb_ctl_request cr; memset(&cr,0,sizeof(cr));
@@ -290,10 +306,19 @@ static int probe_is_gip(int fd, const char *path, int quiet) {
     "# ds4 = takeover : EXPERIMENTAL - present it as a virtual DualSense for\n" \
     "#                  PS5 games. The PS5 currently fights this: expect\n" \
     "#                  resets, or a connection that does nothing.\n" \
-    "ds4=native\n"
+    "ds4=native\n" \
+    "#\n" \
+    "# ds3 = native   : leave a USB PS3 controller alone (default)\n" \
+    "# ds3 = takeover : EXPERIMENTAL - use it as a virtual DualSense. Works\n" \
+    "#                  for ~30-40 s, then the PS5 reports 'Device not\n" \
+    "#                  supported' and resets it.\n" \
+    "ds3=native\n"
 /* DS4 takeover is EXPERIMENTAL: the PS5 fights it (device resets, or a
  * stable connection whose input the PS5 ignores). Default: leave it native. */
 static int g_ds4_takeover = 0;
+/* DS3 takeover is EXPERIMENTAL for the same reason: input works for
+ * ~30-40s, then the PS5 shows "Device not supported" and resets it. */
+static int g_ds3_takeover = 0;
 
 static void load_config(void) {
     FILE *f = fopen(CONFIG_PATH, "r");
@@ -303,7 +328,7 @@ static void load_config(void) {
             fputs(DEFAULT_CONFIG_TEXT, f);
             fclose(f);
         }
-        gp_log("config: %s created with defaults (ds4=native)\n", CONFIG_PATH);
+        gp_log("config: %s created with defaults (ds4=native, ds3=native)\n", CONFIG_PATH);
         return;
     }
     char line[128];
@@ -317,10 +342,16 @@ static void load_config(void) {
             else if (strcmp(val, "takeover") == 0) g_ds4_takeover = 1;
             else gp_log("config: unknown ds4 value \"%s\" — keeping %s\n",
                         val, g_ds4_takeover ? "takeover" : "native");
+        } else if (strcmp(key, "ds3") == 0) {
+            if (strcmp(val, "native") == 0) g_ds3_takeover = 0;
+            else if (strcmp(val, "takeover") == 0) g_ds3_takeover = 1;
+            else gp_log("config: unknown ds3 value \"%s\" — keeping %s\n",
+                        val, g_ds3_takeover ? "takeover" : "native");
         }
     }
     fclose(f);
-    gp_log("config: ds4=%s\n", g_ds4_takeover ? "takeover" : "native");
+    gp_log("config: ds4=%s ds3=%s\n", g_ds4_takeover ? "takeover" : "native",
+           g_ds3_takeover ? "takeover" : "native");
 }
 
 /* Per-path "already logged as unsupported" key (vid<<16|pid), to keep the
@@ -397,6 +428,15 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
             if (dv==VID_N64 && dp==PID_N64) {
                 gp_log("probe: %s → N64-style pad (by vendor ID)\n", path);
                 *out_vid=VID_N64; *out_pid=PID_N64; found=1; goto done;
+            }
+            if (dv==VID_DS3 && dp==PID_DS3) {
+                if (g_ds3_takeover) {
+                    gp_log("probe: %s → PS3 controller (DualShock 3), taking over\n", path);
+                    *out_vid=VID_DS3; *out_pid=PID_DS3; found=1; goto done;
+                }
+                if (!quiet) gp_log("probe: %s PS3 controller left alone (ds3=native)\n", path);
+                probe_seen_set(path, ((uint32_t)dv << 16) | dp);
+                goto done;
             }
             if (ds4_is_ds4(dv, dp)) {
                 if (g_ds4_takeover) {
@@ -609,6 +649,60 @@ static void *usb_hid_thread(void *arg) {
         goto main_loop;
     }
 
+    /* ── DualShock 3: HID on interface 0, IN 0x81, needs GET_REPORT 0xF2 ── */
+    if (vid == VID_DS3 && pid == PID_DS3) {
+        int attempt;
+        for (attempt = 0; attempt < 5; attempt++) {
+            fd = open(dev_path, O_RDWR);
+            if (fd < 0) { gp_log("slot[%d] DS3 open fail errno=%d\n", slot, errno); goto exit_slot; }
+            { int i0 = 0; ioctl(fd,USB_IFACE_DRIVER_DETACH,&i0); }
+            memset(eps,0,sizeof(eps)); memset(&init,0,sizeof(init));
+            init.pEndpoints=eps; init.ep_index_max=2;   /* 0 = IN 0x81, 1 = OUT 0x02 */
+            if (ioctl(fd,USB_FS_INIT,&init)==0) {
+                memset(&fs_open,0,sizeof(fs_open));
+                fs_open.ep_index=0; fs_open.ep_no=DS3_EP_IN;
+                fs_open.max_bufsize=64; fs_open.max_frames=1;
+                if (ioctl(fd,USB_FS_OPEN,&fs_open)==0) break;
+                memset(&uninit,0,sizeof(uninit)); ioctl(fd,USB_FS_UNINIT,&uninit);
+            }
+            gp_log("slot[%d] DS3 OPEN retry %d errno=%d\n", slot, attempt, errno);
+            close(fd); fd=-1;
+            usleep(50000);
+        }
+        if (fd < 0) { gp_log("slot[%d] DS3 give up\n", slot); goto exit_slot; }
+        gp_log("slot[%d] DS3 IN ep=0x%02x ok maxpkt=%u\n",
+               slot, DS3_EP_IN, (unsigned)fs_open.max_packet_length);
+        hid_xfer_len = fs_open.max_packet_length;
+        if (hid_xfer_len == 0 || hid_xfer_len > 64) hid_xfer_len = 64;
+
+        /* Start-up, as captured working on PS5 (FW 11.40). The 0xF2 reply
+         * holds the controller's Bluetooth address, so it is not logged. */
+        { uint8_t f2[DS3_F2_LEN]; memset(f2,0,sizeof(f2));          /* GET_REPORT feature 0xF2 */
+          int r = usb_ctrl(fd, 0xA1, 0x01, 0x03F2, 0, f2, sizeof(f2));
+          gp_log("slot[%d] DS3 GET_REPORT 0xF2 ret=%d errno=%d\n", slot, r, r < 0 ? errno : 0); }
+        { uint8_t f5[8]; memset(f5,0,sizeof(f5));                   /* GET_REPORT feature 0xF5 */
+          int r = usb_ctrl(fd, 0xA1, 0x01, 0x03F5, 0, f5, sizeof(f5));
+          gp_log("slot[%d] DS3 GET_REPORT 0xF5 ret=%d errno=%d\n", slot, r, r < 0 ? errno : 0); }
+        { uint8_t f4[4] = { 0x42, 0x0c, 0x00, 0x00 };               /* PS3 "enable": SET_REPORT feature 0xF4 */
+          int r = usb_ctrl(fd, 0x21, 0x09, 0x03F4, 0, f4, sizeof(f4));
+          gp_log("slot[%d] DS3 SET_REPORT 0xF4 ret=%d errno=%d\n", slot, r, r < 0 ? errno : 0); }
+        { uint8_t led[DS3_LED_REPORT_LEN]; memcpy(led, ds3_led1_report, sizeof(led));
+          int r = usb_ctrl(fd, 0x21, 0x09, 0x0201, 0, led, sizeof(led)); /* LED 1 via SET_REPORT */
+          gp_log("slot[%d] DS3 LED1 (control) ret=%d errno=%d\n", slot, r, r < 0 ? errno : 0); }
+        { struct usb_fs_open fo; memset(&fo,0,sizeof(fo));           /* LED 1 via interrupt OUT 0x02 */
+          fo.ep_index=1; fo.ep_no=0x02; fo.max_bufsize=64; fo.max_frames=1;
+          int oo = (ioctl(fd,USB_FS_OPEN,&fo)==0);
+          int r = oo ? usb_send_out(fd, &eps[1], ds3_led1_report, DS3_LED_REPORT_LEN, "ds3_led") : -1;
+          gp_log("slot[%d] DS3 LED1 (OUT 0x02) opened=%d ret=%d\n", slot, oo, r); }
+        /* Which of 0xF4 / OUT-endpoint LED starts the stream wasn't isolated;
+         * before both were added, every IN read timed out. */
+
+        buffers[0]=buf; lengths[0]=hid_xfer_len;
+        eps[0].ppBuffer=buffers; eps[0].pLength=lengths; eps[0].nFrames=1;
+        eps[0].timeout=100; eps[0].flags=USB_FS_FLAG_SINGLE_SHORT_OK|USB_FS_FLAG_MULTI_SHORT_OK;
+        goto main_loop;
+    }
+
     /* ── DualShock 4: HID on interface 3, IN 0x84, no handshake ─────────── */
     if (vid == VID_SONY && pid == PID_DS4) {
         int attempt;
@@ -753,12 +847,13 @@ main_loop: ;
     const int is_gcpad = (pid == PID_GCPAD && vid == VID_GCPAD);
     const int is_n64   = (pid == PID_N64   && vid == VID_N64);
     const int is_ds4   = (vid == VID_SONY && pid == PID_DS4);
-    const int is_hid   = is_gcpad || is_n64 || is_ds4;
+    const int is_ds3   = (vid == VID_DS3 && pid == PID_DS3);
+    const int is_hid   = is_gcpad || is_n64 || is_ds4 || is_ds3;
     int hs_state = (pid==PID_XBOX || is_hid) ? HS_STREAMING : HS_WAIT_81_01;
     uint8_t nintendo_seq = 1;
     /* HID pad transfers run with a 100ms timeout, so wait up to ~120ms for COMPLETE */
     const int cw_max = is_hid ? 240 : 60;
-    int hid_logged = 0;
+    int hid_logged = 0, hid_bad = 0;
     struct timeval ds4_tcheck; gettimeofday(&ds4_tcheck, NULL);   /* DIAG (DS4 resets) */
 
     while (1) {
@@ -822,6 +917,16 @@ main_loop: ;
             memset(&stop,0,sizeof(stop)); stop.ep_index=0; ioctl(fd,USB_FS_STOP,&stop);
             continue;
         }
+        /* A completed transfer can still have failed (e.g. status 20 = timeout):
+         * its buffer is then stale/zero, so never parse it. */
+        if (eps[0].status != 0) {
+            if (is_hid && hid_bad < 3) {
+                hid_bad++;
+                gp_log("slot[%d] transfer status=%u len=%u — skipped\n",
+                       slot, (unsigned)eps[0].status, (unsigned)lengths[0]);
+            }
+            continue;
+        }
         if(lengths[0]<1) continue;
 
         uint32_t len = lengths[0];
@@ -837,7 +942,8 @@ main_loop: ;
                 gp_log("slot[%d] HID pad report len=%u: %02x %02x %02x %02x %02x %02x %02x %02x\n",
                        slot, (unsigned)len, buf[0],buf[1],buf[2],buf[3],buf[4],buf[5],buf[6],buf[7]);
             }
-            injected = is_ds4 ? ds4_handle_packet(buf, len, &pad)
+            injected = is_ds3 ? ds3_handle_packet(buf, len, &pad)
+                     : is_ds4 ? ds4_handle_packet(buf, len, &pad)
                      : is_n64 ? n64_handle_packet(buf, len, &pad)
                               : gcpad_handle_packet(buf, len, &pad);
         } else {
@@ -942,7 +1048,8 @@ static void *controller_manager_thread(void *arg) {
                 (vid==VID_XBOX   && pid==PID_XBOX)   ? "Xbox controller" :
                 (vid==VID_GCPAD  && pid==PID_GCPAD)  ? "GameCube-style USB pad" :
                 (vid==VID_N64    && pid==PID_N64)    ? "N64-style USB pad" :
-                (vid==VID_SONY   && pid==PID_DS4)    ? "PS4 controller" : "Unknown";
+                (vid==VID_SONY   && pid==PID_DS4)    ? "PS4 controller" :
+                (vid==VID_DS3    && pid==PID_DS3)    ? "PS3 controller" : "Unknown";
 
             gp_log("manager: %s at %s → slot[%d]\n", name, path, slot);
             notify("Ghostcontrol: %s detected — assign user on screen", name);

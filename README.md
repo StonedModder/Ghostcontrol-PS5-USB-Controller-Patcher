@@ -48,6 +48,7 @@ https://github.com/user-attachments/assets/6583b1c2-3d3d-4f2e-9e79-689121fea4a3
 | Generic GameCube-style USB pad (DragonRise / "Microntek USB Joystick") | HID | 0079:0006 | ✅ Working ¹ |
 | Generic N64-style USB pad ("SWITCH CO.,LTD.") | HID on PC, Switch Pro mode on PS5 | 0e6d:111d / 057e:2009 | ✅ Working ¹ |
 | Sony DualShock 4 (PS4 controller) v1 / v2 | HID, interface 3 | 054c:05c4 / 09cc | ⚠️ Experimental, off by default ² |
+| Sony DualShock 3 (PS3 controller) | HID + start-up requests | 054c:0268 | ⚠️ Experimental, off by default ³ |
 
 ¹ Tested on a PS5 launch ("fat") model, firmware 11.40.
 
@@ -57,6 +58,11 @@ Ghostcontrol leaves it alone. Setting `ds4=takeover` in
 the payload) makes the payload present it as a virtual DualSense for PS5 games.
 This currently doesn't work reliably: the PS5 either keeps resetting the
 controller or ignores the virtual DualSense's input.
+
+³ `ds3=takeover` in the same file enables the PS3 controller. Input works for
+about 30–40 seconds, then the PS5 shows "Device not supported" and resets the
+controller. Both Sony controllers hit PS5-side interference that the non-Sony
+pads don't; the cause is not yet known.
 
 Controllers are identified in this order:
 1. Vendor ID from the USB device descriptor: Microsoft `045e` → Xbox,
