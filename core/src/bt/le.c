@@ -6,11 +6,15 @@
  *               resolvable private addresses, through their IRK)
  *   pairing     SMP as initiator, "Just Works": LE Secure Connections when
  *               both sides can (the controller does the P-256 maths), LE
- *               legacy otherwise. The keys the pad hands out are stored.
+ *               legacy otherwise. The keys the pad hands out are stored; a
+ *               pad that accepts an identity key is given ours (an IRK
+ *               kept beside the store) and our public address, which some
+ *               pads (the Xbox Series) need before they send input.
  *   encryption  with the long-term key, on every reconnection
  *   GATT        PnP ID (vendor, product), the HID service, its reports and
  *               their Report References, the Report Map when no profile
  *               knows the pad, then notifications on for every input report
+ *               and, to a pad that offers a HID Control Point, Exit Suspend
  *
  * Input reports arrive as notifications and go through the same profiles
  * as Classic pads; output reports go out as Write Commands.
@@ -21,6 +25,7 @@
 #include "util.h"
 
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -74,11 +79,12 @@ enum {
 #define UUID_REPORT_MAP     0x2A4B
 #define UUID_REPORT         0x2A4D
 #define UUID_PNP_ID         0x2A50
+#define UUID_CONTROL_POINT  0x2A4C  /* HID Control Point: 1 = Exit Suspend */
 
 #define OUR_MTU             185
 
 #define T_LE_CONNECT     8000   /* LE Create Connection to Connection Complete */
-#define T_SMP_STEP       4000   /* no pairing progress: start over (SMP never repeats) */
+#define T_SMP_STEP       4000   
 #define T_ENC            4000   /* encryption with a stored key */
 #define T_KEYS           3000   /* the pad's keys after encryption */
 #define T_ATT_RESEND     1500
@@ -685,10 +691,91 @@ static void legacy_confirm(host_t *h, link_t *l, const uint8_t r[16], uint8_t ou
     smp_c1(tk, r, preq, pres, 0, l->le_s.addr_type, ia, ra, out);
 }
 
+/* ---- our identity --------------------------------------------------------------- */
+
+/* After the pad's keys, a pad that agreed to it gets ours: our identity key
+ * (IRK) and our public address, in that order, as SMP_ID_INFO then
+ * SMP_ID_ADDR. Some pads take the bond as unfinished without them: the Xbox
+ * Series blinks and sends no input. Gated on the pad's own key distribution
+ * flags: only when the pad says it accepts an identity key do we send ours. */
+
+/* Our IRK, made once and kept beside the pairing store (<store>.irk). */
+static uint8_t s_irk[16];
+static int s_irk_ok;
+static char s_irk_path[sizeof ((host_t *)0)->db_path];
+
+/* The handover happens once per connection. le_link has no field for it
+ * (host_int.h is shared with the Classic half), so it is kept here, by link
+ * and connection handle: a link_t reused later is a different connection. */
+static struct { const link_t *l; unsigned handle; } s_ident[HOST_MAX_PADS];
+
+static int ident_taken(const link_t *l)
+{
+    int i;
+
+    for (i = 0; i < HOST_MAX_PADS; i++)
+        if (s_ident[i].l == l && s_ident[i].handle == l->handle) return 1;
+    return 0;
+}
+
+static void ident_mark(const link_t *l)
+{
+    int i, slot = 0;
+
+    for (i = 0; i < HOST_MAX_PADS; i++) {
+        if (s_ident[i].l == l && s_ident[i].handle == l->handle) return;
+        if (!s_ident[i].l) { slot = i; break; }
+    }
+    s_ident[slot].l = l;
+    s_ident[slot].handle = l->handle;
+}
+
+static void load_host_irk(host_t *h)
+{
+    char path[sizeof h->db_path + 8];
+    FILE *f;
+
+    if (s_irk_ok && strcmp(s_irk_path, h->db_path) == 0) return;
+    s_irk_ok = 0;
+    snprintf(path, sizeof path, "%s.irk", h->db_path);
+    f = fopen(path, "rb");
+    if (f) {
+        s_irk_ok = fread(s_irk, 1, sizeof s_irk, f) == sizeof s_irk;
+        fclose(f);
+    }
+    if (!s_irk_ok) {
+        rand_bytes(s_irk, sizeof s_irk);
+        f = fopen(path, "wb");
+        if (f) {
+            (void)fwrite(s_irk, 1, sizeof s_irk, f);
+            fclose(f);
+        }
+    }
+    snprintf(s_irk_path, sizeof s_irk_path, "%s", h->db_path);
+    s_irk_ok = 1;
+}
+
+static void send_host_identity(host_t *h, link_t *l)
+{
+    le_link *e = &l->le_s;
+    uint8_t identity[7];
+
+    if (ident_taken(l) || !(e->pres[5] & e->preq[5] & 0x02)) return;
+    load_host_irk(h);
+    smp_send(h, l, SMP_ID_INFO, s_irk, 16);
+    identity[0] = 0;                    /* public address, in HCI order */
+    memcpy(identity + 1, h->bdaddr, 6);
+    smp_send(h, l, SMP_ID_ADDR, identity, sizeof identity);
+    ident_mark(l);
+    log_line("le pad %s: our identity handed over", addr_str(l->addr));
+}
+
 static void bond_save(host_t *h, link_t *l)
 {
     le_link *e = &l->le_s;
     db_rec *d;
+
+    send_host_identity(h, l);
 
     if (e->keys_got & 0x02) {           /* the pad's identity address */
         d = db_put(h, e->id_addr);
@@ -733,7 +820,7 @@ static void smp_start(host_t *h, link_t *l)
     e->preq[2] = 0x00;                  /* no OOB data */
     e->preq[3] = (uint8_t)(0x01 | (h->le_pk_ok ? 0x08 : 0));   /* bonding, SC */
     e->preq[4] = 16;                    /* key size */
-    e->preq[5] = 0x00;                  /* we hand out no keys */
+    e->preq[5] = 0x02;                  /* our identity, if the pad takes it */
     e->preq[6] = 0x03;                  /* the pad's LTK and identity */
     smp_send(h, l, SMP_PAIRING_REQ, e->preq + 1, 6);
     e->smp = SMP_WAIT_RSP;
@@ -985,6 +1072,27 @@ static void read_handle(host_t *h, link_t *l, uint16_t handle)
     att_send(h, l, q, 3);
 }
 
+/* HID over GATT: a pad that offers a Control Point is told to leave suspend
+ * (Exit Suspend, a write without response; nothing is waited for). Pads
+ * without one are left alone. Some pads keep the HID channel suspended
+ * after a reconnection and never send reports until told. */
+static void wake_hid(host_t *h, link_t *l)
+{
+    le_link *e = &l->le_s;
+    uint8_t q[4];
+    int i;
+
+    for (i = 0; i < e->nch; i++) {
+        if (e->ch[i].uuid != UUID_CONTROL_POINT || !(e->ch[i].props & 0x04)) continue;
+        q[0] = 0x52;                    /* write command */
+        put16(q + 1, e->ch[i].value);
+        q[3] = 0x01;                    /* Exit Suspend */
+        l2_send(h, l, CID_ATT, q, 4);
+        log_line("le pad %s: told to leave suspend", addr_str(l->addr));
+        return;
+    }
+}
+
 /* Moves to `state`, sending its first request. */
 static void gatt_go(host_t *h, link_t *l, int state)
 {
@@ -1062,6 +1170,7 @@ static void gatt_go(host_t *h, link_t *l, int state)
     case G_CCCD:
         i = next_char(e, e->idx, wants_cccd);
         if (i < 0) {
+            wake_hid(h, l);
             e->gatt = G_DONE;
             gatt_cache_put(h, l);
             break;
@@ -1442,7 +1551,11 @@ void le_step(host_t *h, link_t *l, long now)
     if (e->gatt == G_IDLE) {
         gatt_cache_rec *gc = gatt_cache_find(h, link_id_addr(l));
         e->mtu = 23;
-        if (gc && gc->nch > 0) {
+        /* The cache holds the HID service's shape, but it skips the PnP
+         * read, the service walk and the report map: it may only be used
+         * when the bond's ids already name a profile this build knows.
+         * An unknown pad reads its report map every time, as it must. */
+        if (gc && gc->nch > 0 && l->ids_known && profile_find(l->vid, l->pid) != NULL) {
             e->nch = gc->nch;
             e->svc_start = gc->svc_start;
             e->svc_end = gc->svc_end;

@@ -7,8 +7,8 @@ TaskPage build_task_page(std::size_t page, const Section &catalog,
                          const ServiceSnapshot::View &view, const TaskRead &read) {
     using Builder = TaskPage (*)(const Section &, const ServiceSnapshot::View &, const TaskRead &);
     static const Builder builders[] = {controllers_task, setup_task, bluetooth_task,
-        profiles_task, lights_task, service_task, diagnostics_task, audio_task, donate_task,
-        about_task};
+        profiles_task, lights_task, service_task, updates_task, diagnostics_task, audio_task,
+        donate_task, about_task};
     TaskPage result = builders[std::min(page, std::size(builders) - 1)](catalog, view, read);
     // Every working catalog action remains reachable, but never as a status
     // tile. The focused tools view supplies its description independently.

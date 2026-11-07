@@ -1,35 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later
- *
- * Virtual-device identity policy: a refusal table, not a translation layer.
- *
- * The module answers one question for a caller that wants to create a console
- * virtual pad: may this identity be attempted on this platform, and if not, why
- * not, as a stable token the caller can log. Availability here means "our tree
- * already calls it and nothing in the evidence forbids it"; it never means the
- * identity was observed working, and no host gate can make it mean that.
- *
- * It does NOT create, delete, feed, bind or assign a device, does not call
- * libScePad or libSceMbus, has no platform conditional (no __PROSPERO__, no SDK
- * header), holds no state and allocates nothing.
- *
- * The only identity reported usable is the one the product already passes as
- * type 3 (core/src/gc_main.c:993, core/src/bt/ps5_vpad.c:461); the table makes
- * the surrounding refusals explicit where the code today simply never asks.
- *
- * Citations:
- *  - Ghostpad-main/src/main.c:204-209 - type 3 is their working DualSense /
- *    RemotePlay identity; type 0 is a classic DS4 type and
- *    scePadVirtualDeviceAddDevice answers 0x80920001 for it, so it must not be
- *    used as a default.
- *  - Ghostpad-main/README.md:304 advertises "TYPE 0 = DS4" while the only
- *    handler assigns it straight into the same call
- *    (Ghostpad-main/src/main.c:271-275, :1035-1042); the drop records no
- *    success for type 0 anywhere.
- *  - PSVR2 Sense left/right do not occur in the drop at all (no value, no
- *    report, no pairing evidence), so there is nothing to encode.
- *  - audit/ghostpad-intake/EVALUATION.md, "P2 - Refusal-first virtual-identity
- *    policy module", is the specification for this file.
- */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
 #include <stdint.h>

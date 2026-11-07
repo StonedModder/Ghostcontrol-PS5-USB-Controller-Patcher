@@ -82,6 +82,23 @@
 #define T_INIT_RETRY     800    /* before repeating an unanswered sequence */
 #define INIT_ROUNDS        5
 
+#define T_INQUIRY_WATCHDOG 13000 /* a 10.24 s inquiry is over by then: the
+                                 * completion event was lost on the shared radio */
+#define T_INQUIRY_RETRY     500 /* wait after a refused inquiry command ... */
+#define T_INQUIRY_RETRY_MAX 8000 /* ... doubling up to this */
+#define T_EIR_WAIT         8000 /* a gamepad that answered without an identity:
+                                 * how long to wait for a complete answer
+                                 * before calling it blind */
+#define T_FRESH_LINK       3000 /* between dropping a link with no channel
+                                 * resources and calling the pad again */
+#define FRESH_LINK_TRIES      1 /* such links made again in one search */
+#define CHAN_REFUSED_MAX      8 /* channel refusals before the link is dropped */
+#define T_EXIST_HOLD       5000 /* an address that answered "already exists" is
+                                 * not called again for this long: a stale link
+                                 * must not become a call per poll */
+#define LINK_NAME_MAX        40 /* a pad's name from its inquiry response */
+#define HOST_BAN_MAX         16 /* session-only excluded addresses; never stored */
+
 #define SDP_Q_IDS          1    /* Device ID: vendor and product */
 #define SDP_Q_DESC         2    /* HID report descriptor, for the generic profile */
 #define T_PROBE_IDLE   20000    /* nothing heard for this long: probe */
@@ -119,6 +136,8 @@ typedef struct {
     int cfg_theirs_ok;      /* we accepted the pad's */
     int cfg_tries;
     long t_state, t_cfg;
+    int refused;            /* connection responses refusing this channel */
+    long retry_at;          /* no new request before this (refusal backoff) */
 } chan;
 
 /* A paired pad. Classic pads keep a link key; LE pads a long-term key
@@ -210,6 +229,8 @@ typedef struct {
     int connected;          /* the ACL link is up */
     unsigned handle;
     int pairing;            /* we found it in pairing mode */
+    uint32_t cod;           /* class of device, as its inquiry record said */
+    char name[LINK_NAME_MAX]; /* name from its inquiry response, "" if none */
     long t_create, t_conn;
 
     int auth_sent, auth_ok, enc_sent, enc_on;

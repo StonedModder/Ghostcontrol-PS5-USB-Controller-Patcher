@@ -9,6 +9,8 @@ port="${GC_APP_SERVICE_PORT:-39073}"
 case "${GC_STRICT_ZERO_KERNEL_IMPORTS:-0}" in 0|1) ;; *) printf 'strict audit flag must be 0 or 1\n' >&2; exit 2;; esac
 mkdir -p "$out"
 ulimit -c 0
+# Host/diagnostic builds intentionally omit gc_update* so UPDATE_* stays refused
+# there. Resident native (GhosttoothAPI Makefile) links the updater + CA bundle.
 sources=(gc_app_service gc_runtime_commands gc_app_pad gc_config gc_profile gc_ini gc_ipc gc_log_tail gc_controller_commands gc_service_audio gc_service_capture audio/gc_audio audio/gc_audio_capture audio/gc_audio_settings audio/gc_audio_dsp gc_file_safety)
 src=(); for f in "${sources[@]}"; do src+=("$repo/core/src/$f.c"); done
 variant="${2:-resident}"

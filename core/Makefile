@@ -11,6 +11,7 @@ PORT     ?= 9021
 VERSION  := 2.0.0-dev.1
 TARGET   := out/$(VERSION)/ghostcontrol-core-$(VERSION).elf
 BUILD_DIR := .build
+TEST_DIR  := $(BUILD_DIR)/tests
 TOOLS    := ../tools
 .DEFAULT_GOAL := app-service
 
@@ -74,7 +75,7 @@ STUB_SRC := $(S)/gc_ds4_source.c $(S)/gc_ds4_game_stub.c \
 	$(S)/gc_dualsense_fx_remote.c
 STUB_OBJ := $(STUB_SRC:.c=.o)
 
-.PHONY: all clean deploy release print-target app-service print-app-service
+.PHONY: all clean deploy release test print-target app-service test-app-service print-app-service
 .PHONY: console-test-audio-capture
 
 # The default builds only the reviewed normal-API companion. The legacy full
@@ -84,6 +85,10 @@ GC_APP_SERVICE_PORT ?= 39073
 app-service:
 	$(PYTHON) $(TOOLS)/build-openprospero.py service --openprospero "$(OPENPROSPERO_ROOT)" \
 		--output "$(abspath $(APP_SERVICE_BUILD_ROOT)/..)" --service-port "$(GC_APP_SERVICE_PORT)"
+
+test-app-service:
+	GC_APP_SERVICE_BUILD_ROOT="$(APP_SERVICE_BUILD_ROOT)" GC_APP_SERVICE_PORT="$(GC_APP_SERVICE_PORT)" \
+		bash $(TOOLS)/build-app-service.sh host
 
 print-app-service:
 	@printf '%s\n' '$(APP_SERVICE_BUILD_ROOT)/ghostcontrol-app-service.elf'
@@ -97,116 +102,3 @@ legacy: $(TARGET)
 print-target:
 	@printf '%s\n' '$(TARGET)'
 
-$(STUB_OBJ): %.o: %.c $(wildcard $(S)/*.h)
-	$(CC) $(CFLAGS) -fno-vectorize -fno-slp-vectorize -fno-builtin -c $< -o $@
-
-$(TARGET): $(SRC) $(wildcard $(S)/*.h) $(STUB_OBJ)
-	@mkdir -p $(dir $(TARGET))
-	$(CC) $(CFLAGS) -o $@ $(filter-out $(STUB_SRC),$(SRC)) $(STUB_OBJ) \
-		$(LDFLAGS) $(LDLIBS)
-	python3 $(TOOLS)/check_ds4_stubs.py $@
-	@sh $(TOOLS)/check_imports.sh $@; rc=$$?; \
-	if [ $$rc -eq 1 ]; then echo "check_imports: refusing $@" >&2; rm -f $@; exit 1; fi; \
-	if [ $$rc -eq 2 ]; then echo "check_imports: skipped (no readelf on this host)" >&2; fi
-
-release: $(TARGET)
-	@mkdir -p $(BUILD_DIR)
-	@set -e; r="$(BUILD_DIR)/core.elf"; s="$(BUILD_DIR)/core-stripped.elf"; \
-	trap 'rm -f "$$r" "$$s"' EXIT; \
-	cp $(TARGET) "$$r"; \
-	$(GC_OBJCOPY) --strip-debug "$$r" "$$s"; \
-	python3 $(TOOLS)/check_ds4_stubs.py "$$s"; \
-	cp "$$s" $(TARGET)
-
-deploy: $(TARGET)
-	nc -w 8 $(PS5_HOST) $(PORT) < $(TARGET)
-
-# Host test suite. Ported from the 1.x payload Makefile with every path
-# adapted to this tree (sources under src/, Bluetooth host under src/bt/,
-# tests under tests/). Each binary is built and run immediately so a failure
-# stops the suite. tests/bt/ holds the separate Ghosttooth runtime sim
-# harnesses; those were not wired by the reference target (their includes are
-# rooted at the old runtime layout) and are intentionally left out here.
-# Run this focused producer regression before older broad steps, so a known
-# unrelated failure cannot hide the new acceptance check.
-SETUP_PREVIEW_TEST_ROOT ?= $(abspath $(TEST_DIR)/setup-preview-$(shell date +%Y%m%d-%H%M%S-%N))
-# Many fixtures mkdtemp a private store under TMPDIR and refuse to run without
-# one. Honour a caller-provided TMPDIR, and otherwise keep the temp root inside
-# TEST_DIR so the suite does not depend on the host exporting one.
-TMPDIR ?= $(TEST_DIR)/tmp
-export TMPDIR
-.PHONY: 
-clean:
-	rm -f $(STUB_OBJ)
-	rm -rf $(BUILD_DIR) out
-
-# AUDIO-07 console gate: the same gate source as the host test, compiled for
-# the console with the payload SDK and run there (the devloop's file channel
-# pulls /data/gc-audio-capture-gate.log back). Not part of the host `test`
-# target, and the gate itself opens no radio, capture service or console API:
-# its service is the fake backend. Load it with tools/ps5loop.py load, which
-# sends any payload ELF to the console's loader on port 9021.
-PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
-CONSOLE_GATE := $(BUILD_DIR)/gc-audio-capture-gate.elf
-CONSOLE_GATE_SHA := $(shell sha256sum $(TS)/test_gc_audio_capture.c | cut -d' ' -f1)
-CONSOLE_GATE_DEF := -DGC_CAPTURE_GATE_TESTSHA="\"$(CONSOLE_GATE_SHA)\""
-console-test-bt-rx:
-	@test -x "$(PS5_PAYLOAD_SDK)/bin/prospero-clang" || { echo "console-test-bt-rx: no payload SDK at PS5_PAYLOAD_SDK=$(PS5_PAYLOAD_SDK)" >&2; exit 1; }
-	@mkdir -p $(BUILD_DIR)
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang -I$(S) -I$(BT) -I$(PS5_PAYLOAD_SDK)/target/include \
-		-D__PROSPERO__ -std=gnu11 -Wall -Wextra -Wshadow -Werror -g -O2 \
-		-Dmain=gc_bt_rx_gate_main -DGC_BT_RX_GATE_TESTSHA="\"$$(sha256sum $(TS)/test_bt_rx.c | cut -d' ' -f1)\"" \
-		-c $(TS)/test_bt_rx.c -o $(TEST_DIR)/rx-gate-test.o
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang -I$(S) -I$(BT) -I$(PS5_PAYLOAD_SDK)/target/include \
-		-D__PROSPERO__ -std=gnu11 -Wall -Wextra -Wshadow -Werror -g -O2 \
-		-DGC_BT_RX_GATE_TESTSHA="\"$$(sha256sum $(TS)/test_bt_rx.c | cut -d' ' -f1)\"" \
-		-o $(BUILD_DIR)/gc-bt-rx-gate.elf ../tools/bt-rx-gate.c $(TEST_DIR)/rx-gate-test.o \
-		$(BT)/hci_rx.c $(BT)/evstream.c
-	@printf '%s\n' '$(abspath $(BUILD_DIR)/gc-bt-rx-gate.elf)'
-
-console-test-audio-capture:
-	@test -x "$(PS5_PAYLOAD_SDK)/bin/prospero-clang" || { echo "console-test-audio-capture: no payload SDK at PS5_PAYLOAD_SDK=$(PS5_PAYLOAD_SDK)" >&2; exit 1; }
-	@mkdir -p $(BUILD_DIR)
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang -I$(S) -I$(S)/audio -I$(PS5_PAYLOAD_SDK)/target/include \
-		-D__PROSPERO__ -std=gnu11 -Wall -Wextra -Wshadow -Werror -g -O2 \
-		-Dmain=gc_capture_gate_main $(CONSOLE_GATE_DEF) \
-		-c $(TS)/test_gc_audio_capture.c -o $(TEST_DIR)/gate-test.o
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang -I$(S) -I$(S)/audio -I$(PS5_PAYLOAD_SDK)/target/include \
-		-D__PROSPERO__ -std=gnu11 -Wall -Wextra -Wshadow -Werror -g -O2 \
-		$(CONSOLE_GATE_DEF) \
-		-o $(CONSOLE_GATE) ../tools/audio-capture-gate.c $(TEST_DIR)/gate-test.o \
-		$(S)/audio/gc_audio_capture.c $(S)/audio/gc_audio.c $(S)/audio/gc_audio_settings.c \
-		$(S)/audio/gc_audio_dsp.c $(S)/gc_file_safety.c
-	@printf '%s\n' '$(abspath $(CONSOLE_GATE))'
-
-# AUDIO-02/03/04 rework gate: the same three test translation units, compiled
-# for the console with their entry points renamed, and one runner that calls
-# them in order. The gates' dependencies are their own fakes (owner reports,
-# scripted PDUs, byte buffers), so this payload opens no radio, no capture
-# service, no pad and no title; it writes /data/gc-audio-rework-gate.log and
-# nothing else. Load it with tools/ps5loop.py load and pull the log over FTP.
-AUDIO_REWORK_GATE := $(BUILD_DIR)/gc-audio-rework-gate.elf
-AUDIO_RATE_SHA := $(shell sha256sum $(TS)/test_gc_audio_rate.c | cut -d' ' -f1)
-AUDIO_RETRY_SHA := $(shell sha256sum $(TS)/test_gc_audio_avdtp_retry.c | cut -d' ' -f1)
-AUDIO_AVCTP_SHA := $(shell sha256sum $(TS)/test_gc_audio_avctp.c | cut -d' ' -f1)
-AUDIO_REWORK_DEF := -DGC_AUDIO_RATE_GATE_TESTSHA="\"$(AUDIO_RATE_SHA)\"" \
-	-DGC_AUDIO_RETRY_GATE_TESTSHA="\"$(AUDIO_RETRY_SHA)\"" \
-	-DGC_AUDIO_AVCTP_GATE_TESTSHA="\"$(AUDIO_AVCTP_SHA)\""
-AUDIO_GATE_CFLAGS = -I$(S) -I$(S)/audio -I$(PS5_PAYLOAD_SDK)/target/include \
-	-D__PROSPERO__ -std=gnu11 -Wall -Wextra -Wshadow -Werror -g -O2 $(AUDIO_REWORK_DEF)
-console-test-audio-rework:
-	@test -x "$(PS5_PAYLOAD_SDK)/bin/prospero-clang" || { echo "console-test-audio-rework: no payload SDK at PS5_PAYLOAD_SDK=$(PS5_PAYLOAD_SDK)" >&2; exit 1; }
-	@mkdir -p $(BUILD_DIR)
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang $(AUDIO_GATE_CFLAGS) -Dmain=gc_audio_rate_gate_main \
-		-c $(TS)/test_gc_audio_rate.c -o $(TEST_DIR)/rate-gate-test.o
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang $(AUDIO_GATE_CFLAGS) -Dmain=gc_audio_retry_gate_main \
-		-c $(TS)/test_gc_audio_avdtp_retry.c -o $(TEST_DIR)/retry-gate-test.o
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang $(AUDIO_GATE_CFLAGS) -Dmain=gc_audio_avctp_gate_main \
-		-c $(TS)/test_gc_audio_avctp.c -o $(TEST_DIR)/avctp-gate-test.o
-	$(PS5_PAYLOAD_SDK)/bin/prospero-clang $(AUDIO_GATE_CFLAGS) \
-		-o $(AUDIO_REWORK_GATE) ../tools/audio-rework-gate.c \
-		$(TEST_DIR)/rate-gate-test.o $(TEST_DIR)/retry-gate-test.o $(TEST_DIR)/avctp-gate-test.o \
-		$(S)/audio/gc_audio_codec.c $(S)/audio/gc_audio_avdtp.c $(S)/audio/gc_audio_controls.c \
-		$(S)/audio/gc_audio.c $(S)/audio/gc_audio_settings.c $(S)/audio/gc_audio_dsp.c \
-		$(S)/gc_file_safety.c
-	@printf '%s\n' '$(abspath $(AUDIO_REWORK_GATE))'

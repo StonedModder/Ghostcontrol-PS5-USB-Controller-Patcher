@@ -185,7 +185,7 @@
     "core/src/gc_file_safety.c": "4b518dd9add433edf8f596131f740e299cc4c83babde29559c444b5eaedd6bda"
   },
   "stock_crt_sha256": "e13ce68fcd8525df4b480a37b6239827e30998284781f4dd0cf37ec06717371a",
-  "stock_crt_authority": "WORK-CHECKLIST.md:89 required stock preparation only; reviewed linked __crt_start/__patch_init and runtime-loader helpers; no local extra credential bridge, process attachment or backend privilege extension",
+  "stock_crt_authority": "required stock preparation only; reviewed linked __crt_start/__patch_init and runtime-loader helpers; no local extra credential bridge, process attachment or backend privilege extension",
   "new_import_citations": {
     "fchmod": [
       "core/src/gc_app_service.c:113:(void)fchmod(fd,0600);",

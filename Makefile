@@ -8,7 +8,7 @@
 # Neither one patches the Shell, so neither depends on a firmware offset
 # table or a bundle fingerprint.
 
-.PHONY: all core ui deps clean deploy-core deploy-ui
+.PHONY: all core ui deps test clean deploy-core deploy-ui
 
 all: ui
 
@@ -25,6 +25,9 @@ core:
 ui:
 	$(MAKE) -C ui
 
+test:
+	$(MAKE) -C core test
+	$(MAKE) -C ui test
 
 deploy-core:
 	$(MAKE) -C core deploy

@@ -2,70 +2,48 @@
 
 ## What you need
 
-- A jailbroken PS5 with an ELF loader (port **9021**).
-- **GhosttoothAPI.elf** — the controller companion service.
-- The **Ghostcontrol Toolbox** homebrew title (ZIP / folder under `/data/homebrew`).
-- A supported USB or Bluetooth controller.
-- A normal DualSense (or another working pad) to operate the Toolbox while you configure a custom controller.
+- A jailbroken PS5 with an ELF loader.
+- The combined Ghostcontrol ELF for your firmware and test version.
+- A supported USB controller and its cable or receiver.
+- A normal DualSense to operate the Toolbox while the custom controller is being configured.
 
-Ghostcontrol 2.0 is **two pieces**: the companion ELF and the native Toolbox app. It does **not** inject into ShellUI and does **not** require a combined “XMB” payload.
+Ghostcontrol is distributed as one combined ELF. It contains the controller service and the PS5 home-screen integration. Do not send a separate Ghostcontrol UI payload afterward.
 
-## Install the Toolbox
+## Load Ghostcontrol
 
-1. Copy the release title folder (for example `PPSA62838`) to `/data/homebrew/` on the console (FTP, USB, or your usual homebrew installer).
-2. Refresh the home screen if needed so **Ghostcontrol Toolbox** appears as a normal title.
+1. Jailbreak the console and start its ELF loader.
+2. Send `Ghostcontrol-<version>.elf` to the loader port, normally `9021`.
+3. Wait for the Ghostcontrol notification.
+4. Open the new **Ghostcontrol** home-screen item and enter **Ghostcontrol Toolbox**.
 
-## Load the companion
-
-1. Jailbreak and start the ELF loader.
-2. Send `GhosttoothAPI.elf` to port **9021**.
-3. Wait for the service notification (if enabled).
-
-You can also start or restart the companion later from the Toolbox **Service** page when a packaged copy is present in the app assets.
-
-## Open the Toolbox
-
-1. Launch **Ghostcontrol Toolbox** from the home screen.
-2. Beta builds may show a launch notice — choose **Continue**, or **Don’t show again** to save that preference.
-3. Open **Service** and confirm the companion is connected / running. Use **Start service** if it is not.
+If a newly built Toolbox does not appear after sending another ELF, reboot, jailbreak again, and load the new ELF. Reloading an ELF does not replace an already injected ShellUI module in the current boot.
 
 ## Connect and assign a controller
 
-1. Plug in the custom USB controller (or pair Bluetooth from the Bluetooth page).
-2. Open **Controllers** and refresh if needed — you should see the device.
-3. When Ghostcontrol creates a virtual DualSense, the PS5 shows **Who's using this controller?**
-4. Press the requested button and pick the account that should own that virtual pad.
-5. After assignment, input from the custom controller is streamed through that virtual DualSense.
+1. Plug in the custom USB controller before starting the service.
+2. Open **Service** in the Toolbox.
+3. Turn on **Start input when payload loads** if you want controller input to start automatically on later launches.
+4. Select **Start service**.
+5. Ghostcontrol creates a virtual DualSense. The PS5 opens its normal **Who's using this controller?** screen.
+6. Press the requested button and choose the account that should use the virtual controller.
+7. After assignment, Ghostcontrol keeps sending the custom controller's input through that virtual controller.
 
-The account is chosen by the system UI. Ghostcontrol does not ask you to type a user ID.
+The account is chosen by the PS5 screen. Ghostcontrol does not need you to type a user ID. If more than one custom controller is connected, assign each virtual controller when its prompt appears. The Dashboard shows each connected slot and whether it is waiting for assignment.
 
 ## Confirm basic operation
 
-On **Controllers** / status rows, check:
+Open **Dashboard** and check:
 
-- Service is running.
-- At least one USB or BT controller is listed.
-- The slot is no longer waiting for assignment.
+- **Service** reports that it is running.
+- **USB controllers** is greater than zero.
+- A connected slot shows the controller VID and PID.
+- The slot no longer says **press a button to assign** after account assignment.
 
-Test D-pad, face buttons, shoulders, triggers, sticks, L3, and R3. If the pad is found but mappings are wrong, run [Guided Controller Setup](Guided-Controller-Setup.md). If it is not found, add or fix a rule — see [Toolbox Reference](Toolbox-Reference.md#controller-rules).
+Test the D-pad, face buttons, shoulders, triggers, both sticks, L3, and R3. If the controller is found but its controls are wrong, create a profile with [Guided Controller Setup](Guided-Controller-Setup.md). If it is not found, refresh connected controllers and review [Controller Rules](Toolbox-Reference.md#controller-rules).
 
-## Profiles and setup
+## Reconnect or recover assignment
 
-- **Profiles** — create, edit, import, and export mapping INIs.
-- **Guided setup** — teach Ghostcontrol every control on an unknown device.
-- **Lights & Rumble** — DualSense lightbar FX and motor tests.
-- **Bluetooth** — pair / forget / retry wireless pads.
-- **Service** — start/stop/restart, autostart, diagnostics.
-
-## Logs
-
-- App log (while the title runs): `/mnt/sandbox/<TITLE_ID>_000/download0/ghostcontrol/app.log`
-- Service log: under `/data/ghostcontrol/` (exact path depends on companion variant)
-
-See [Troubleshooting and Logs](Troubleshooting-and-Logs.md).
-
-## Recover
-
-- **Restart service** from the Service page if input dies after unplug/replug.
-- Close the Toolbox from the control center (**Close App**) before replacing the installed title folder.
-- Reload the companion on **9021** after a full reboot / new jailbreak session.
+- **Rebind controllers** reapplies profile selection and controller bindings.
+- **Reset controller connections** recreates the controller connections. The PS5 may ask for user assignment again.
+- **Restart service** is the quickest recovery when input stopped after unplugging or changing a rule.
+- **Reload configuration** reads profile and rule files copied to the console after Ghostcontrol started.

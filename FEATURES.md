@@ -10,10 +10,10 @@ runtime behavior. Track each capability separately as implemented, host-tested,
 integrated, hardware-tested, or unavailable. The user has reported ineffective
 toggles and controller effects; those remain acceptance failures until the real
 state changes and controller output are verified. Current evidence belongs in
-`PROGRESS.md` and the per-row audit in `docs/USABILITY-MATRIX.md`.
+project notes and the per-row audit in `docs/USABILITY-MATRIX.md`.
 
-`reference/toolbox-ui/src/ghostcontrol_toolbox.cpp` holds all 194 element ids
-from the 1.x UI, and `reference/toolbox-ui/src/ghostcontrol_client.cpp` holds
+`legacy reference holds all 194 element ids
+from the 1.x UI, and `legacy reference holds
 the command vocabulary. Those two files are the specification to port against.
 `docs/UI-DESIGN.md` says which widget each screen is built from.
 
@@ -42,7 +42,7 @@ the command vocabulary. Those two files are the specification to port against.
 | Credits / attribution | n/a (presentation only) | n/a | display-only rows (text bundled; testers row loads `testers.txt`) |
 
 
-> **Status column reconciled 2026-10-14 by WIRE-01** (`audit/wire-01-final.md`):
+> **Status column reconciled 2026-10-14 by WIRE-01** (`
 > the previous blanket `to port` text was stale. States above are source-derived
 > (79 rows enumerated across 8 screens; 25 row-fired commands; core suite exit 0,
 > UI suite 121 checks 0 failures). host-tested = ordinary host gates only;
@@ -60,7 +60,7 @@ and saved controller rules are different inventories. A compile/stub check is
 not evidence that input or output works on hardware.
 
 **3D controller preview.** 1.x drew it with three.js in a web view
-(`reference/view/`). That does not port to the native OpenGL renderer: either
+(`legacy reference That does not port to the native OpenGL renderer: either
 rebuild it against the widget kit or show a 2D diagram instead.
 
 **Credits.** Carried over as text to re-present, since it was pure
@@ -77,11 +77,17 @@ bytes of log (32768 hex characters) so it always fits `GC_IPC_MAX_RESPONSE`
 
 ## Bluetooth provenance
 
-The Bluetooth host in `core/src/bt/` is Ghostcontrol's own code. It is a
-userland USB-HCI host — it opens the console's Bluetooth controller as a USB
-HCI device and runs inquiry, link keys, L2CAP, SDP and HID itself (plus SMP and
-GATT for LE), then feeds a virtual DualSense. The approach was learned from a
-teammate's project, which is not referenced, named or imported anywhere in this
-tree. The one hard-won detail worth never relosing: **ACL OUT is endpoint
-`0x02`, not the first bulk OUT in the descriptor** — `gc_bt.c` tries `0x01`
-and falls back to `0x02` after 500 ms.
+The Bluetooth host in `core/src/bt/` is the console-side stack for this product:
+opening the MediaTek radio as a USB HCI device and running inquiry, link keys,
+L2CAP, SDP and HID over it, plus SMP and GATT for LE. Support files
+(`crc32.c`, `evstream.c`, `profiles.c`, `smp_crypto.c`, `usb_desc.c`) have been
+restructured or extended in place; `profiles.c` also carries Joy-Con, Wii / Wii U
+Pro, and Hori profile tables.
+
+The one hard-won detail worth never losing: **on the MediaTek `0e8d:3603` the
+ACL OUT is the second bulk OUT** — the descriptor's first bulk OUT there runs a
+written ACL packet as an HCI command (opcode `0x2033`) that the system stack
+also sees. `bt/hci_usb.c` chooses `0x02` at open time on that chip and keeps
+`0x01` as the fallback; every other chip keeps descriptor order and switches to
+the second pipe only when the first fails.
+

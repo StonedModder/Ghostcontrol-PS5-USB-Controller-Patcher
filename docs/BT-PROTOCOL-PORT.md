@@ -91,4 +91,4 @@ To test the LE connection state machine:
 > backlog (extended advertising `0x0A`, LE connection-parameter initiation,
 > GATT caching, HID boot protocol, numeric-comparison pairing, L2CAP
 > credit-based flow, USB reset recovery, LE PHY selection) are NOT claimed
-> complete. See `audit/wire-01-final.md`.
+> complete. See `

@@ -399,6 +399,13 @@ void ToolboxUi::draw_workspace(DrawList &list, const Fonts &fonts,
         paragraph(list,fonts.regular,p.detail,96,590,28,920,muted,4);
         facts(list,fonts,p.facts,1170,415,600,3);
         break;
+    case TaskScene::updates:
+        /* Same band as Ghosttooth API: figure + detail left, facts right. */
+        list.line(1090,390,1090,790,1,line);
+        paragraph(list,fonts.display,p.status,96,462,54,930,color,2);
+        paragraph(list,fonts.regular,p.detail,96,590,28,920,muted,4);
+        facts(list,fonts,p.facts,1170,415,600,3);
+        break;
     case TaskScene::diagnostics: {
         eyebrow(list,fonts,"Live report",96,409);
         facts(list,fonts,p.facts,96,463,795,3);
@@ -443,21 +450,40 @@ void ToolboxUi::draw_directory(DrawList &list,const Fonts &fonts) const {
     static const char *descriptions[]={"See your controllers and saved device rules.",
         "Learn a controller, one button at a time.","Connect a wireless controller.",
         "Create and edit saved button layouts.","Adjust the lightbar and test vibration.",
-        "Start Ghosttooth API and manage controller input.","Inspect device details and service logs.",
+        "Start Ghosttooth API and manage controller input.",
+        "Check for app updates and install a verified release.",
+        "Inspect device details and service logs.",
         "Check this build's audio support.","Support the project and what your donations fund.",
         "Credits, licenses and build information."};
     const char *description = "";
     if(menu_index_ < sizeof(descriptions)/sizeof(descriptions[0]))
         description = descriptions[menu_index_];
-    /* Fit every workspace above the footer: a tenth entry overran it. */
-    const float step=sections_.size()>1
-        ? std::min(61.0f,(930.0f-370.0f)/static_cast<float>(sections_.size()-1)) : 61.0f;
-    for(std::size_t i=0;i<sections_.size();++i) {
-        const float y=370+static_cast<float>(i)*step;
-        if(i==menu_index_) list.line(96,y-24,96,y+9,4,blue);
-        hui::ui::text(list,fonts.mono,(i<9?"0":"")+std::to_string(i+1),125,y,21,muted);
-        hui::ui::text(list,i==menu_index_?fonts.semibold:fonts.regular,sections_[i].name,
-                      190,y,32,i==menu_index_?ink:muted);
+    /* Fit every workspace above the footer. When rows would go under 48px,
+     * scroll a ~9-row window around menu_index_ instead of clipping. */
+    const float list_top = 370.0f;
+    const float list_span = 930.0f - list_top;
+    const std::size_t count = sections_.size();
+    const float min_step = 48.0f;
+    const std::size_t window = 9;
+    float step = count > 1
+        ? std::min(61.0f, list_span / static_cast<float>(count - 1)) : 61.0f;
+    std::size_t start = 0;
+    std::size_t visible = count;
+    if (count > 1 && step < min_step) {
+        visible = std::min(count, window);
+        step = visible > 1
+            ? std::min(61.0f, list_span / static_cast<float>(visible - 1)) : 61.0f;
+        if (menu_index_ >= visible)
+            start = menu_index_ + 1 - visible;
+        if (start + visible > count)
+            start = count > visible ? count - visible : 0;
+    }
+    for (std::size_t i = start; i < count && i < start + visible; ++i) {
+        const float y = list_top + static_cast<float>(i - start) * step;
+        if (i == menu_index_) list.line(96, y - 24, 96, y + 9, 4, blue);
+        hui::ui::text(list, fonts.mono, (i < 9 ? "0" : "") + std::to_string(i + 1), 125, y, 21, muted);
+        hui::ui::text(list, i == menu_index_ ? fonts.semibold : fonts.regular, sections_[i].name,
+                      190, y, 32, i == menu_index_ ? ink : muted);
     }
     paragraph(list,fonts.display,sections_[menu_index_].name,985,449,54,800,ink,2);
     paragraph(list,fonts.regular,description,985,570,32,790,muted,4);
@@ -548,7 +574,10 @@ void ToolboxUi::draw_hints(DrawList &list,const Fonts &fonts) const {
         hints[n++]={hui::ui::Button::circle,"Back"};
     } else {
         if(tools_open_ || !task_.buttons.empty()) hints[n++]={hui::ui::Button::cross,"Select"};
-        hints[n++]={hui::ui::Button::circle,tools_open_?"Back":"Workspaces"};
+        /* While guided setup is capturing, Circle is the control the wizard is
+         * counting and back is suppressed; promising "Workspaces" there would
+         * advertise a navigation the shell refuses (setup_capture_blocks_back). */
+        hints[n++]={hui::ui::Button::circle,setup_capture_?"Counts for setup":(tools_open_?"Back":"Workspaces")};
         /* Square opens the page's own report. On the funding page that report
          * is the three full strings, which is the option a person needs when a
          * code will not scan; the verb stays the shared one so the footer row

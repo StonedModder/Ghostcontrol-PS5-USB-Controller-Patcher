@@ -50,9 +50,6 @@ typedef struct {
     uint64_t ambiguity_ms;
 } GcVpadIdentify;
 
-/* Ghostpad-main values mirrored from core/src/bt/ps5_vpad.c:98-99. They are not
- * applied to a machine that has been configured, and nothing in this module
- * derives them. */
 #define GC_VPAD_IDENTIFY_WINDOW_MS     3000u
 #define GC_VPAD_IDENTIFY_AMBIGUITY_MS   300u
 

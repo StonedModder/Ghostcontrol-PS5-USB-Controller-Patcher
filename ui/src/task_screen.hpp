@@ -13,7 +13,10 @@ namespace ghostcontrol {
 
 // Presentation is task-specific. The legacy Row aggregates are retained only
 // as the internal, tested command/receipt catalog, never as screen geometry.
-enum class TaskScene { controllers, setup, bluetooth, profiles, lights, service, diagnostics, audio, donate, about };
+enum class TaskScene {
+    controllers, setup, bluetooth, profiles, lights, service, updates,
+    diagnostics, audio, donate, about
+};
 enum class TaskTone { quiet, good, busy, warning };
 struct TaskFact { std::string label; std::string value; };
 struct TaskItem { std::string title; std::string detail; };
@@ -61,6 +64,7 @@ TaskPage bluetooth_task(const Section &, const ServiceSnapshot::View &, const Ta
 TaskPage profiles_task(const Section &, const ServiceSnapshot::View &, const TaskRead &);
 TaskPage lights_task(const Section &, const ServiceSnapshot::View &, const TaskRead &);
 TaskPage service_task(const Section &, const ServiceSnapshot::View &, const TaskRead &);
+TaskPage updates_task(const Section &, const ServiceSnapshot::View &, const TaskRead &);
 TaskPage diagnostics_task(const Section &, const ServiceSnapshot::View &, const TaskRead &);
 TaskPage audio_task(const Section &, const ServiceSnapshot::View &, const TaskRead &);
 TaskPage donate_task(const Section &, const ServiceSnapshot::View &, const TaskRead &);

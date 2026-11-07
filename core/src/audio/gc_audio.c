@@ -486,7 +486,6 @@ GcAudioError gc_audio_start(GcAudio *audio, const char *headset, const char *sou
     audio->transport_phase = PHASE_OPENING; /* events for this session are valid from here */
     pthread_mutex_unlock(&audio->mutex);
 
-    /* 5. Ask the transport. Progress may arrive before this returns. */
     const int stream_failed =
         audio->transport.open_stream(audio->transport.ctx, address, session, info.sample_rate, info.channels) != 0;
     pthread_mutex_lock(&audio->mutex);

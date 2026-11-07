@@ -35,7 +35,10 @@
 #define ACL_BUF     HCI_PKT_MAX
 
 #define X_ACL_OUT   (N_EVENT_RD + N_ACL_RD)
-#define X_ACL_OUT2  (X_ACL_OUT + 1)     /* the chip's second bulk OUT, tried if the first never finishes */
+/* The chip's other bulk OUT. It is the one ACL starts on for a chip whose
+ * first bulk OUT runs written ACL as a command (see choose_acl_out), and in
+ * every case the one the timeout switch falls back to. */
+#define X_ACL_OUT2  (X_ACL_OUT + 1)
 #define N_XFER      (X_ACL_OUT2 + 1)
 
 typedef struct {
@@ -59,6 +62,7 @@ typedef struct {
     unsigned stall_limit_ms;        /* learned ACL-out stall limit in ms (0 = default) */
     unsigned acl_out_switches;      /* stalled writes that switched to the second pipe */
     int out2_open;
+    int acl_out_second;             /* ACL starts on the descriptor's second bulk OUT */
     int out_done_logged;
     int ev_read_len;                /* one packet of the events endpoint */
     int n_functions;                /* how many the chip has, for the log */
@@ -353,8 +357,9 @@ static void op_diag(void *ctx)
         log_line("diag: the first read to finish was transfer %d (%s), %d bytes in %d frame(s): %s",
                  c->first_idx, c->first_idx < N_EVENT_RD ? "events" : "ACL in",
                  c->first_len, c->first_frames, hex);
-        log_line("diag: using interface %d: events %#x, ACL in %#x, ACL out %#x (%d HCI function(s) in the chip)",
-                 c->iface, c->ep_events, c->ep_acl_in, c->ep_acl_out, c->n_functions);
+        log_line("diag: using interface %d: events %#x, ACL in %#x, ACL out %#x (%#x on a stall), %d HCI function(s) in the chip",
+                 c->iface, c->ep_events, c->ep_acl_in, c->ep_acl_out, c->ep_acl_out2,
+                 c->n_functions);
     }
     for (i = 0; i < 48; i++)
         if (c->status_hist[i]) log_line("diag: %u reads ended with USB status %u", c->status_hist[i], i);
@@ -408,6 +413,57 @@ static void op_diag(void *ctx)
                 log_line("diag: interface %d is held by driver \"%.40s\"", j, name);
         }
     }
+}
+
+
+typedef struct {
+    uint16_t vid, pid;
+    const char *why;
+} acl_out_quirk;
+
+static const acl_out_quirk k_acl_out_quirks[] = {
+    { 0x0E8D, 0x3603, "the first bulk OUT runs written ACL as an HCI command (opcode 0x2033)" },
+};
+
+static const acl_out_quirk *quirk_for(uint16_t vid, uint16_t pid)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof k_acl_out_quirks / sizeof k_acl_out_quirks[0]; i++)
+        if (k_acl_out_quirks[i].vid == vid && k_acl_out_quirks[i].pid == pid)
+            return &k_acl_out_quirks[i];
+    return NULL;
+}
+
+/* Swaps the two ACL OUT roles. out_idx keeps naming the primary transfer, so
+ * the timeout switch still goes from the primary to the fallback. */
+static void swap_acl_out(usb_ctx *c)
+{
+    const uint8_t first = c->ep_acl_out;
+
+    c->ep_acl_out = c->ep_acl_out2;
+    c->ep_acl_out2 = first;
+    c->acl_out_second = !c->acl_out_second;
+}
+
+static void choose_acl_out(usb_ctx *c)
+{
+    const acl_out_quirk *q;
+
+    /* One bulk OUT: there is nothing to choose, and the timeout switch has
+     * no second pipe to go to. */
+    if (!c->ep_acl_out2) return;
+    q = c->dd_ok ? quirk_for((uint16_t)UGETW(c->dd.idVendor),
+                             (uint16_t)UGETW(c->dd.idProduct)) : NULL;
+    if (!q) {
+        log_line("usb: ACL out on %#x, %#x kept for a write that stalls",
+                 c->ep_acl_out, c->ep_acl_out2);
+        return;
+    }
+    swap_acl_out(c);
+    log_line("usb: %04x:%04x: ACL out on %#x, not %#x: %s; %#x kept as fallback",
+             UGETW(c->dd.idVendor), UGETW(c->dd.idProduct),
+             c->ep_acl_out, c->ep_acl_out2, q->why, c->ep_acl_out2);
 }
 
 /* The HCI function and endpoints to use, from the chip's own descriptor: the
@@ -525,6 +581,7 @@ int hci_usb_open(hci_t *out)
         op_close(c);
         return 0;
     }
+    choose_acl_out(c);
     hci_rx_init(&c->rx);
 
     for (i = 0; i < N_XFER; i++) {
@@ -555,8 +612,23 @@ int hci_usb_open(hci_t *out)
     /* The OUT transfer first: if the kernel's budget runs out, it must not
      * be the one left without a transfer. */
     if (!xfer_open(c, X_ACL_OUT, c->ep_acl_out, ACL_BUF)) {
-        op_close(c);
-        return 0;
+        /* The pipe chosen above will not open here: go back to descriptor
+         * order rather than lose the radio over it. */
+        if (!c->acl_out_second) {
+            op_close(c);
+            return 0;
+        }
+        {
+            const uint8_t refused = c->ep_acl_out;
+
+            swap_acl_out(c);
+            log_line("usb: ACL out %#x could not be opened; starting on %#x",
+                     refused, c->ep_acl_out);
+        }
+        if (!xfer_open(c, X_ACL_OUT, c->ep_acl_out, ACL_BUF)) {
+            op_close(c);
+            return 0;
+        }
     }
     /* The spare OUT is opened only if it is there; its absence is no failure. */
     if (c->ep_acl_out2) c->out2_open = xfer_open(c, X_ACL_OUT2, c->ep_acl_out2, ACL_BUF);

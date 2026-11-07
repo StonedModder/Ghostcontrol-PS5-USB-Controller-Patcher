@@ -777,6 +777,7 @@ std::vector<Section> build_screens()
     sections.push_back(build_screen_profiles());
     sections.push_back(build_screen_lightfx());
     sections.push_back(build_screen_service());
+    sections.push_back(build_screen_updates());
     sections.push_back(build_screen_diagnostics());
     sections.push_back(build_screen_audio());
     sections.push_back(build_screen_donate());
@@ -1798,6 +1799,15 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
      * behaving as L2 and R2. */
     const bool confirm = input.is_pressed(Action::confirm);
     const bool back = input.is_pressed(Action::back);
+    /* Guided setup leases one control at a time and the shell must yield to it.
+     * CIRCLE is Action::back (overlay.cpp action map), so an ungated back opened
+     * the page menu on the very presses the walk was counting: the prompt was
+     * replaced by the menu on every confirmation and the CIRCLE step could not
+     * be finished. CROSS survived because it is Action::confirm. The gate holds
+     * only while a session is active AND a target is armed, so review keeps
+     * Circle as Back. */
+    setup_capture_circle_ = setup_capture_target(service.setup_json) == "CIRCLE";
+    setup_capture_ = setup_capture_armed(service.setup_json);
     const bool page_prev = input.is_pressed(Action::page_prev);
     const bool page_next = input.is_pressed(Action::page_next);
 
@@ -2004,7 +2014,11 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
     }
 
     rebuild_task(service);
-    if (page_prev || page_next) {
+    /* L1/R1 are page navigation and are also controls the walk learns later in
+     * the order: while a capture is armed they belong to the wizard, so a press
+     * must not switch workspaces and hide the prompt (same collision as CIRCLE
+     * with Back). Navigation returns the moment the walk ends. */
+    if ((page_prev || page_next) && !setup_capture_) {
         open_section(page_prev ? (section_index_ + sections_.size() - 1) % sections_.size()
                                : (section_index_ + 1) % sections_.size(), feedback);
         page_menu_ = tools_open_ = false;
@@ -2022,13 +2036,27 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
         }
         return;
     }
+    if (back && setup_capture_)
+    {
+        /* The press went to the wizard, so nothing navigates: say what it did
+         * and name the way out, because the menu can no longer be opened from
+         * the pad for the length of the capture. */
+        show_toast(setup_capture_circle_
+            ? "Setup is learning Circle. Press it 3 times; Cancel stops the guide."
+            : "Setup is capturing controls. Answer the prompt; Cancel stops the guide.");
+        feedback.play(Cue::tick);
+        return;
+    }
     if (back) {
         if (tools_open_) { tools_open_ = false; button_focus_ = 0; }
         else { page_menu_ = true; menu_index_ = section_index_; }
         feedback.play(Cue::back);
         return;
     }
-    if (!tools_open_ && input.is_pressed(Action::west)) {
+    /* SQUARE and OPTIONS are learned controls too: while a capture is armed,
+     * Square must not open the reader and Options must not toggle Tools, or the
+     * prompt disappears mid-step exactly as it did for Circle. */
+    if (!tools_open_ && !setup_capture_ && input.is_pressed(Action::west)) {
         std::vector<std::string> lines{task_.lead, "", task_.status, task_.detail, ""};
         if(!toast_text_.empty()) { lines.push_back("Last result"); lines.push_back(toast_text_); lines.push_back(""); }
         for (const auto &f : task_.facts) { lines.push_back(f.label); lines.push_back("  " + f.value); lines.push_back(""); }
@@ -2037,7 +2065,7 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
                     std::move(lines), feedback);
         return;
     }
-    if (input.is_pressed(Action::menu)) {
+    if (!setup_capture_ && input.is_pressed(Action::menu)) {
         tools_open_ = !tools_open_; tool_index_ = 0;
         feedback.play(Cue::select); return;
     }
@@ -2055,13 +2083,22 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
     focus_ = Focus::content;
     {
         const std::size_t rows = buttons.size();
-        if (confirm && rows > 0 && row().command && std::string_view(row().command)=="AUDIO_UI")
+        /* The walk owns Cross while it is asking for CROSS: in that window a
+         * Cross press is one of its three confirmations, not "activate the
+         * focused row" (setup_capture_blocks_confirm). The Setup page's own
+         * Cancel row keeps confirm in every capture, so a guide can always be
+         * abandoned from the pad instead of only by its timeout. */
+        const bool cancel_row = rows > 0 && row().command &&
+            std::string_view(row().command) == "SETUP_CANCEL";
+        const bool activate = confirm &&
+            (!setup_capture_blocks_confirm(service.setup_json) || cancel_row);
+        if (activate && rows > 0 && row().command && std::string_view(row().command)=="AUDIO_UI")
         {
             const bool accepted=service_ && audio_screen_.press(row(),*service_);
             show_toast(audio_screen_.feedback());
             feedback.play(accepted?Cue::select:Cue::error);
         }
-        else if (confirm && rows > 0 && row().app_launch_opt_in)
+        else if (activate && rows > 0 && row().app_launch_opt_in)
         {
             const auto &v = app_preference_view_;
             if (row().disabled || row().read_only || !app_preferences_ || !v.available || !v.loaded || v.pending) {
@@ -2091,7 +2128,7 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
                 }
             }
         }
-        else if (confirm && rows > 0 && (row().stops_companion || row().restarts_companion))
+        else if (activate && rows > 0 && (row().stops_companion || row().restarts_companion))
         {
             /* Resident Stop/Restart: the worker identifies the instance and
              * confirms the result; the frame only queues the receipt. */
@@ -2100,7 +2137,7 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
             const std::uint64_t receipt = row().stops_companion ? stop_companion() : restart_companion();
             feedback.play(receipt ? Cue::select : Cue::error);
         }
-        else if (confirm && rows > 0 && row().starts_companion)
+        else if (activate && rows > 0 && row().starts_companion)
         {
             /* The companion row is the one press that must work when nothing
              * is answering: it hands the packaged ELF to the console's own
@@ -2111,7 +2148,7 @@ void ToolboxUi::update(const hui::InputFrame &input, float dt, hui::ui::Feedback
             press_age_ = 0.0f;
             feedback.play(start_companion() ? Cue::select : Cue::error);
         }
-        else if (confirm && rows > 0)
+        else if (activate && rows > 0)
         {
             const Row &chosen = row();
             app_log("workspace action: page=%s action=%s", section().name, chosen.label);
