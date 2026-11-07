@@ -15,6 +15,7 @@
 #include "controller_ds4.h"
 #include "controller_mamba.h"
 #include "controller_nintendo.h"
+#include "controller_xbox.h"
 #include "usb_helpers.h"
 #include <stdarg.h>
 #include "ps5_vpad.h"
@@ -249,6 +250,10 @@ typedef struct {
     uint32_t out_len;
     uint8_t *out_ptr;
     ScePadData decoded; /* Preserve controls split across HID report IDs. */
+    /* Xbox One / Series pads speak GIP on a vendor interface (ff/47/d0): they
+     * stay silent until the host answers their ANNOUNCE and powers them on. */
+    int gip;
+    XboxControllerState xbox;
 } UsbFeed;
 
 static UsbFeed usb_feed[USB_SLOTS];
@@ -832,6 +837,8 @@ static int usb_supported(const GcUsbDevice *device)
 {
     if (!device) return 0;
     if (usb_xusb_qualified(device)) return 1;
+    if (device->kind == GC_USB_INTERFACE_GIP && device->in_count && device->out_count)
+        return 1;
     if ((device->kind == GC_USB_INTERFACE_HID || device->kind == GC_USB_INTERFACE_HID_RAW) &&
         ds4_is_compatible_vidpid(device->vid, device->pid)) return 1;
     return device->kind == GC_USB_INTERFACE_HID && device->layout.count > 0;
@@ -900,6 +907,16 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
         ok = handled > 0;
         if (handled < 0)
             log_line("usb: %s nintendo OUT failed (%s)", feed->path, strerror(errno));
+    } else if (feed->gip) {
+        const int handled = xbox_handle_packet(feed->fd, feed->ep, feed->report, feed->lenp,
+                                               &decoded, &feed->xbox);
+        if (handled < 0)
+            log_line("usb: %s GIP OUT failed (%s)", feed->path, strerror(errno));
+        /* Status, ACK and announce packets carry no input. Publishing a
+         * neutral state for them would release held buttons, and GIP only
+         * reports on change, so keep the last state instead. */
+        if (handled <= 0) return 0;
+        ok = 1;
     } else if (usb_xusb_qualified(device))
         ok = mamba_xinput_handle_packet(-1, NULL, feed->report, feed->lenp, &decoded);
     else if ((device->kind == GC_USB_INTERFACE_HID || device->kind == GC_USB_INTERFACE_HID_RAW) &&
@@ -1046,7 +1063,8 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
     feed->ep[0].nFrames = 1;
     feed->ep[0].flags = USB_FS_FLAG_SINGLE_SHORT_OK;
     feed->nintendo = usb_is_nintendo(device->vid, device->pid) && device->out_count;
-    const int ep_max = feed->nintendo ? 2 : 1;
+    feed->gip = device->kind == GC_USB_INTERFACE_GIP && device->out_count;
+    const int ep_max = (feed->nintendo || feed->gip) ? 2 : 1;
     /* ep[1] is left zeroed on purpose: usb_send_out() owns the OUT buffers and
      * refuses to write through an endpoint that already has pointers installed. */
     memset(&init, 0, sizeof init);
@@ -1084,6 +1102,37 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
         usb_nintendo_kick(feed);
         feed->hs_state = HS_WAIT_81_01;
         feed->nintendo_seq = 1;
+    }
+    if (feed->gip) {
+        memset(&op, 0, sizeof op);
+        op.ep_index = 1;
+        op.ep_no = device->out[0];
+        op.max_bufsize = sizeof feed->xbox.transfer_output;
+        op.max_frames = 1;
+        if (ioctl(feed->fd, USB_FS_OPEN, &op) != 0) {
+            log_line("usb: %s GIP OUT open errno=%d (%s)", device->path, errno, strerror(errno));
+            (void)usb_release_fd(feed);
+            return 0;
+        }
+        feed->xbox.out_available = 1;
+        /* Bounded (about 1.6 s): ANNOUNCE -> ACK -> power on, as the resident
+         * line does. A late ANNOUNCE is answered again in xbox_handle_packet. */
+        const int handshake = xbox_gip_handshake(feed->fd, feed->ep, device->vid, device->pid,
+                                                 &feed->xbox, NULL, NULL);
+        log_line("usb: %s GIP handshake result=%d", device->path, handshake);
+        if (handshake < 0) {
+            (void)usb_release_fd(feed);
+            return 0;
+        }
+        /* The handshake drove ep[0] with its own buffers; point it back. */
+        feed->ep[0].ppBuffer = (void **)&feed->bufp;
+        feed->ep[0].pLength = &feed->lenp;
+        feed->ep[0].nFrames = 1;
+        feed->ep[0].aFrames = 0;
+        feed->ep[0].status = 0;
+        feed->ep[0].timeout = 0;
+        feed->ep[0].flags = USB_FS_FLAG_SINGLE_SHORT_OK;
+        feed->lenp = feed->in_xfer_len;
     }
     snprintf(feed->path, sizeof feed->path, "%s", device->path);
     feed->vid = device->vid; feed->pid = device->pid; feed->kind = device->kind;

@@ -62,6 +62,7 @@ SOURCES := \
 	$(SRC)/controller_ds4.c \
 	$(SRC)/controller_mamba.c \
 	$(SRC)/controller_nintendo.c \
+	$(SRC)/controller_xbox.c \
 	$(SRC)/usb_helpers.c \
 	$(SRC)/bt/ps5_vpad.c \
 	$(SRC)/gc_service_audio.c \
