@@ -241,27 +241,28 @@ static const char *UGEN_PATHS[] = {
 
 /* Read a USB string descriptor as ASCII into out (may be NULL) and log it. */
 static void probe_log_string(int fd, const char *path, const char *what, uint8_t idx,
-                             char *out, int outlen) {
+                             char *out, int outlen, int quiet) {
     if (out && outlen > 0) out[0] = 0;
-    if (!idx) { gp_log("probe: %s %s: (none)\n", path, what); return; }
+    if (!idx) { if (!quiet) gp_log("probe: %s %s: (none)\n", path, what); return; }
     uint8_t raw[128]; memset(raw,0,sizeof(raw));
     struct usb_gen_descriptor gd; memset(&gd,0,sizeof(gd));
     gd.ugd_data = raw; gd.ugd_maxlen = sizeof(raw); gd.ugd_string_index = idx;
     gd.ugd_lang_id = 0x0409;
     if (ioctl(fd, USB_GET_STRING_DESC, &gd) != 0) {
-        gp_log("probe: %s %s: read failed errno=%d\n", path, what, errno); return;
+        if (!quiet) gp_log("probe: %s %s: read failed errno=%d\n", path, what, errno);
+        return;
     }
     char s[64]; int n = 0;
     for (int i = 2; i + 1 < (int)gd.ugd_actlen && n < (int)sizeof(s) - 1; i += 2)
         s[n++] = (raw[i] >= 0x20 && raw[i] < 0x7f) ? (char)raw[i] : '?';
     s[n] = 0;
-    gp_log("probe: %s %s: \"%s\"\n", path, what, s);
+    if (!quiet) gp_log("probe: %s %s: \"%s\"\n", path, what, s);
     if (out && outlen > 0) { strncpy(out, s, (size_t)outlen - 1); out[outlen - 1] = 0; }
 }
 
 /* Read the active configuration descriptor with a standard GET_DESCRIPTOR
  * control request and check it for an Xbox One/Series (GIP) interface. */
-static int probe_is_gip(int fd, const char *path) {
+static int probe_is_gip(int fd, const char *path, int quiet) {
     uint8_t cd[512]; memset(cd,0,sizeof(cd));
     struct usb_ctl_request cr; memset(&cr,0,sizeof(cr));
     cr.ucr_data = cd;
@@ -272,10 +273,24 @@ static int probe_is_gip(int fd, const char *path) {
     USETW(cr.ucr_request.wIndex, 0);
     USETW(cr.ucr_request.wLength, sizeof(cd));
     if (ioctl(fd, USB_DO_REQUEST, &cr) != 0) {
-        gp_log("probe: %s config descriptor read failed errno=%d\n", path, errno);
+        if (!quiet) gp_log("probe: %s config descriptor read failed errno=%d\n", path, errno);
         return 0;
     }
     return gip_cdesc_has_gip_iface(cd, cr.ucr_actlen);
+}
+
+/* Per-path "already logged as unsupported" key (vid<<16|pid), to keep the
+ * log quiet while an unsupported device stays plugged in. */
+static uint32_t g_probe_seen[N_UGEN_PATHS];
+static int probe_path_index(const char *path) {
+    for (int i = 0; i < N_UGEN_PATHS; i++) if (strcmp(UGEN_PATHS[i], path) == 0) return i;
+    return -1;
+}
+static uint32_t probe_seen_key(const char *path) {
+    int i = probe_path_index(path); return i >= 0 ? g_probe_seen[i] : 0;
+}
+static void probe_seen_set(const char *path, uint32_t key) {
+    int i = probe_path_index(path); if (i >= 0) g_probe_seen[i] = key;
 }
 
 /* Probe one ugen2.x path to identify controller type.
@@ -294,9 +309,10 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
     ini.pEndpoints=&ep; ini.ep_index_max=1;
     if (ioctl(fd,USB_FS_INIT,&ini)!=0) { close(fd); return 0; }
 
-    int ii=0; ioctl(fd,USB_IFACE_DRIVER_DETACH,&ii);
-    ii=1;     ioctl(fd,USB_IFACE_DRIVER_DETACH,&ii);
-    ii=2;     ioctl(fd,USB_IFACE_DRIVER_DETACH,&ii);
+    /* No driver detach here: identification below uses only EP0 control
+     * requests, so the PS5's own driver stays attached to devices we don't
+     * take over (e.g. a natively supported PS4 controller, USB storage).
+     * The USB reader thread detaches the controllers it claims. */
 
     struct usb_fs_open po;
     memset(&po,0,sizeof(po)); po.ep_index=0; po.max_bufsize=64; po.max_frames=1;
@@ -306,15 +322,21 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
     /* Identify by vendor ID from the device descriptor when the PS5 allows it.
      * Endpoint shape alone is ambiguous: some Xbox pads also have a 64-byte
      * IN at 0x81, which the endpoint rules below would call "Nintendo". */
+    int have_dd = 0, quiet = 0;
+    uint16_t dv = 0, dp = 0;
     {
         struct usb_device_descriptor dd; memset(&dd,0,sizeof(dd));
         if (ioctl(fd,USB_GET_DEVICE_DESC,&dd)==0) {
-            uint16_t dv = UGETW(dd.idVendor), dp = UGETW(dd.idProduct);
-            gp_log("probe: %s descriptor vid=%04x pid=%04x bcdDevice=%04x\n",
-                   path, dv, dp, UGETW(dd.bcdDevice));
+            have_dd = 1;
+            dv = UGETW(dd.idVendor); dp = UGETW(dd.idProduct);
+            /* An unsupported device is re-probed every scan: log it only once */
+            quiet = (probe_seen_key(path) == (((uint32_t)dv << 16) | dp));
+            if (!quiet)
+                gp_log("probe: %s descriptor vid=%04x pid=%04x bcdDevice=%04x\n",
+                       path, dv, dp, UGETW(dd.bcdDevice));
             char mfr[64];
-            probe_log_string(fd, path, "manufacturer", dd.iManufacturer, mfr, sizeof(mfr));
-            probe_log_string(fd, path, "product", dd.iProduct, NULL, 0);
+            probe_log_string(fd, path, "manufacturer", dd.iManufacturer, mfr, sizeof(mfr), quiet);
+            probe_log_string(fd, path, "product", dd.iProduct, NULL, 0, quiet);
             if (dv==VID_SWITCH && strncmp(mfr, N64PRO_MANUFACTURER, strlen(N64PRO_MANUFACTURER))==0) {
                 /* N64-style pad posing as a Switch Pro Controller on consoles */
                 gp_log("probe: %s → N64-style pad in Switch Pro mode\n", path);
@@ -344,10 +366,24 @@ static int probe_one_path(const char *path, uint16_t *out_vid, uint16_t *out_pid
 
     /* Third-party Xbox One/Series pads (PowerA, PDP, Hori...) have their own
      * vendor IDs but share the GIP interface signature ff/47/d0. */
-    if (probe_is_gip(fd, path)) {
+    if (probe_is_gip(fd, path, quiet)) {
         gp_log("probe: %s → Xbox (GIP interface ff/47/d0)\n", path);
         *out_vid=VID_XBOX; *out_pid=PID_XBOX; found=1; goto done;
     }
+
+    /* Identified but not supported: leave it with the PS5's driver */
+    if (have_dd) {
+        if (!quiet) gp_log("probe: %s %04x:%04x not supported — left alone\n", path, dv, dp);
+        probe_seen_set(path, ((uint32_t)dv << 16) | dp);
+        goto done;
+    }
+
+    /* Descriptor unreadable: fall back to endpoint guessing, which needs the
+     * PS5 driver detached to open endpoints. */
+    { int i0=0,i1=1,i2=2;
+      ioctl(fd,USB_IFACE_DRIVER_DETACH,&i0);
+      ioctl(fd,USB_IFACE_DRIVER_DETACH,&i1);
+      ioctl(fd,USB_IFACE_DRIVER_DETACH,&i2); }
 
     /* ep=0x81: maxpkt=64 → Nintendo, maxpkt=8 → DragonRise GameCube-style pad */
     po.ep_no=0x81;
