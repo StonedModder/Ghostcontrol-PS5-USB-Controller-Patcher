@@ -234,6 +234,11 @@ typedef struct {
     struct usb_fs_endpoint ep[2];
     uint8_t *bufp;
     uint32_t lenp;
+    /* Bytes requested per IN transfer: the endpoint's wMaxPacketSize, capped
+     * at USB_REPORT. A transfer longer than one packet on a small interrupt
+     * endpoint (e.g. 8 bytes on a DragonRise 0079:0006 pad) is not reliably
+     * completed on PS5, so never ask for more than one packet. */
+    uint32_t in_xfer_len;
     int busy;
     /* Nintendo pads stay silent until 0x80 0x02 / 0x80 0x04 arrive, then speak
      * 0x30/0x3F. The handshake state machine is the resident line's proven one. */
@@ -1050,6 +1055,9 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
         (void)usb_release_fd(feed);
         return 0;
     }
+    feed->in_xfer_len = (op.max_packet_length > 0 && op.max_packet_length <= USB_REPORT)
+                            ? op.max_packet_length : USB_REPORT;
+    feed->lenp = feed->in_xfer_len;
     if (feed->nintendo) {
         memset(&op, 0, sizeof op);
         op.ep_index = 1;
@@ -1291,7 +1299,7 @@ static void usb_tick(void)
             }
         }
         if (!feed->busy) {
-            feed->lenp = USB_REPORT;
+            feed->lenp = feed->in_xfer_len ? feed->in_xfer_len : USB_REPORT;
             feed->ep[0].nFrames = 1;
             feed->ep[0].aFrames = 0;
             feed->ep[0].status = 0;
