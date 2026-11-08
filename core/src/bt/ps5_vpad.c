@@ -209,6 +209,20 @@ static uint64_t hex_after(const char *s, const char *key)
     return v;
 }
 
+/* Newer firmware prints deviceType in decimal (deviceType=22). Parse with
+ * base 0 so a hex spelling (0x16) still works too; hex_after() would read 22
+ * as 0x22 (34), so the new format was never recognized. */
+static int device_type_is(const char *line, unsigned want)
+{
+    const char *p = strstr(line, "deviceType=");
+    char *end;
+
+    if (!p) return 0;
+    p += strlen("deviceType=");
+    const unsigned long value = strtoul(p, &end, 0);
+    return end != p && value == want;
+}
+
 /* A virtual DualSense appearing. Firmware versions format the MBus event
  * differently. Older versions use DeviceId/type/subType/capabilityBattery;
  * newer versions use deviceId/deviceType/userId, for example:
@@ -223,7 +237,7 @@ static uint64_t virtual_device_in(const char *line)
     if (!strstr(line, "DEVICE_ADDED"))
         return 0;
     old_format = strstr(line, "type:1") && strstr(line, "subType:22");
-    new_format = hex_after(line, "deviceType=") == 22;
+    new_format = device_type_is(line, 22);
     if (!old_format && !new_format) return 0;
     bat = strstr(line, "capabilityBattery:");
     if (bat && bat[18] != '0') return 0;
