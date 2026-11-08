@@ -1143,7 +1143,14 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
     if (feed->ds3) {
         const int operational = ds3_set_operational_usb(feed->fd, (uint8_t)device->interface_number);
         log_line("usb: %s DS3 operational=%d", device->path, operational);
-        if (ds3_sony) {
+        if (operational != 0 && device->kind == GC_USB_INTERFACE_HID && device->layout.count) {
+            /* Not answering as a DS3 (e.g. a PS3-labelled wireless dongle that
+             * reports as a plain HID gamepad): decode it from its descriptor
+             * instead of handing every report to the DS3 parser. */
+            log_line("usb: %s DS3 start-up failed; using generic HID", device->path);
+            feed->ds3 = 0;
+        }
+        if (feed->ds3 && ds3_sony) {
             /* An OEM DS3 tested on a PS5 launch model (FW 11.40) kept its IN
              * pipe silent after 0xF2/0xF5 alone. Adding the PS3's own enable
              * (SET_REPORT feature 0xF4 = 42 0c 00 00) and the LED-1 output
