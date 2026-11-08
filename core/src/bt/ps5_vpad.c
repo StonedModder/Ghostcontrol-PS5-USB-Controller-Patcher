@@ -210,7 +210,7 @@ static uint64_t hex_after(const char *s, const char *key)
 }
 
 /* Newer firmware prints deviceType in decimal (deviceType=22). Parse with
- * base 0 so a hex spelling (0x16) still works too; hex_after() would read 22
+ * decimal by default, or hex for an explicit 0x prefix; hex_after() reads 22
  * as 0x22 (34), so the new format was never recognized. */
 static int device_type_is(const char *line, unsigned want)
 {
@@ -219,8 +219,9 @@ static int device_type_is(const char *line, unsigned want)
 
     if (!p) return 0;
     p += strlen("deviceType=");
-    const unsigned long value = strtoul(p, &end, 0);
-    return end != p && value == want;
+    const int base = p[0] == '0' && (p[1] == 'x' || p[1] == 'X') ? 16 : 10;
+    const unsigned long value = strtoul(p, &end, base);
+    return end != p && (*end == '\0' || isspace((unsigned char)*end)) && value == want;
 }
 
 /* A virtual DualSense appearing. Firmware versions format the MBus event
