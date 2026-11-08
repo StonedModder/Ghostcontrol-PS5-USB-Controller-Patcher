@@ -15,6 +15,8 @@
 #include "controller_ds4.h"
 #include "controller_mamba.h"
 #include "controller_nintendo.h"
+#include "controller_xbox.h"
+#include "controller_ds3.h"
 #include "usb_helpers.h"
 #include <stdarg.h>
 #include "ps5_vpad.h"
@@ -234,6 +236,11 @@ typedef struct {
     struct usb_fs_endpoint ep[2];
     uint8_t *bufp;
     uint32_t lenp;
+    /* Bytes requested per IN transfer: the endpoint's wMaxPacketSize, capped
+     * at USB_REPORT. A transfer longer than one packet on a small interrupt
+     * endpoint (e.g. 8 bytes on a DragonRise 0079:0006 pad) is not reliably
+     * completed on PS5, so never ask for more than one packet. */
+    uint32_t in_xfer_len;
     int busy;
     /* Nintendo pads stay silent until 0x80 0x02 / 0x80 0x04 arrive, then speak
      * 0x30/0x3F. The handshake state machine is the resident line's proven one. */
@@ -244,6 +251,15 @@ typedef struct {
     uint32_t out_len;
     uint8_t *out_ptr;
     ScePadData decoded; /* Preserve controls split across HID report IDs. */
+    /* Xbox One / Series pads speak GIP on a vendor interface (ff/47/d0): they
+     * stay silent until the host answers their ANNOUNCE and powers them on. */
+    int gip;
+    XboxControllerState xbox;
+    /* Genuine DualShock 4 on USB: its lightbar stays dark until the host sends
+     * output report 0x05, so the feed opens the OUT pipe once to set it. */
+    int ds4_out;
+    /* DualShock 3 / PS3-protocol pad: silent until put into operational mode. */
+    int ds3;
 } UsbFeed;
 
 static UsbFeed usb_feed[USB_SLOTS];
@@ -254,7 +270,18 @@ static int usb_release_fd(UsbFeed *feed)
     if (feed->fs_initialized) {
         struct usb_fs_uninit un;
         memset(&un, 0, sizeof un);
-        if (ioctl(feed->fd, USB_FS_UNINIT, &un) != 0) return -1;
+        if (ioctl(feed->fd, USB_FS_UNINIT, &un) != 0) {
+            const int err = errno;
+            /* An unplugged device can never be uninitialised; failing here
+             * left the feed open forever (retired every tick, and a replug
+             * was never picked up). The kernel releases the endpoints when
+             * the handle is closed, so carry on to close() in that case. */
+            if (err != ENXIO && err != ENODEV && err != ENOTTY) return -1;
+            static int noted_gone;
+            if (noted_gone++ < 4)
+                fprintf(stderr, "inject: usb %s FS_UNINIT errno=%d: device gone, closing handle\n",
+                        feed->path, err);
+        }
         feed->fs_initialized = 0;
     }
     if (close(feed->fd) != 0) { feed->close_uncertain = 1; return -1; }
@@ -816,6 +843,10 @@ static int usb_supported(const GcUsbDevice *device)
 {
     if (!device) return 0;
     if (usb_xusb_qualified(device)) return 1;
+    if (device->kind == GC_USB_INTERFACE_GIP && device->in_count && device->out_count)
+        return 1;
+    if ((device->kind == GC_USB_INTERFACE_HID || device->kind == GC_USB_INTERFACE_HID_RAW) &&
+        ds3_is_compatible_vidpid(device->vid, device->pid)) return 1;
     if ((device->kind == GC_USB_INTERFACE_HID || device->kind == GC_USB_INTERFACE_HID_RAW) &&
         ds4_is_compatible_vidpid(device->vid, device->pid)) return 1;
     return device->kind == GC_USB_INTERFACE_HID && device->layout.count > 0;
@@ -858,6 +889,22 @@ static int slot_profile(int slot, GcProfile *out)
     return have;
 }
 
+/* Host-to-device class request on EP0. Returns bytes sent or -1. */
+static int usb_class_request(int fd, uint8_t type, uint8_t request, uint16_t value,
+                             uint16_t index, void *data, uint16_t length)
+{
+    struct usb_ctl_request control;
+    memset(&control, 0, sizeof control);
+    control.ucr_data = data;
+    control.ucr_request.bmRequestType = type;
+    control.ucr_request.bRequest = request;
+    USETW(control.ucr_request.wValue, value);
+    USETW(control.ucr_request.wIndex, index);
+    USETW(control.ucr_request.wLength, length);
+    if (ioctl(fd, USB_DO_REQUEST, &control) != 0) return -1;
+    return control.ucr_actlen;
+}
+
 static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state)
 {
     ScePadData decoded = feed->decoded;
@@ -884,11 +931,27 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
         ok = handled > 0;
         if (handled < 0)
             log_line("usb: %s nintendo OUT failed (%s)", feed->path, strerror(errno));
+    } else if (feed->gip) {
+        const int handled = xbox_handle_packet(feed->fd, feed->ep, feed->report, feed->lenp,
+                                               &decoded, &feed->xbox);
+        if (handled < 0)
+            log_line("usb: %s GIP OUT failed (%s)", feed->path, strerror(errno));
+        /* Status, ACK and announce packets carry no input. Publishing a
+         * neutral state for them would release held buttons, and GIP only
+         * reports on change, so keep the last state instead. */
+        if (handled <= 0) return 0;
+        ok = 1;
     } else if (usb_xusb_qualified(device))
         ok = mamba_xinput_handle_packet(-1, NULL, feed->report, feed->lenp, &decoded);
     else if ((device->kind == GC_USB_INTERFACE_HID || device->kind == GC_USB_INTERFACE_HID_RAW) &&
         ds4_is_compatible_vidpid(device->vid, device->pid))
         ok = ds4_handle_packet(-1, NULL, feed->report, feed->lenp, &decoded);
+    else if (feed->ds3) {
+        /* Before the generic HID branch: a DS3 descriptor also parses as HID. */
+        if (ds3_handle_packet(-1, NULL, feed->report, feed->lenp, &decoded) <= 0)
+            return 0;   /* not an input report: keep the last state */
+        ok = 1;
+    }
     else if (device->kind == GC_USB_INTERFACE_HID) {
         source_snapshot_lock();
         GcHidState physical = source_hid_values[feed->slot];
@@ -1030,7 +1093,15 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
     feed->ep[0].nFrames = 1;
     feed->ep[0].flags = USB_FS_FLAG_SINGLE_SHORT_OK;
     feed->nintendo = usb_is_nintendo(device->vid, device->pid) && device->out_count;
-    const int ep_max = feed->nintendo ? 2 : 1;
+    feed->gip = device->kind == GC_USB_INTERFACE_GIP && device->out_count;
+    feed->ds4_out = device->vid == 0x054c &&
+                    (device->pid == 0x05c4 || device->pid == 0x09cc) && device->out_count;
+    feed->ds3 = (device->kind == GC_USB_INTERFACE_HID || device->kind == GC_USB_INTERFACE_HID_RAW) &&
+                ds3_is_compatible_vidpid(device->vid, device->pid);
+    /* Genuine Sony DS3 also gets its LED report on the interrupt OUT pipe. */
+    const int ds3_sony = feed->ds3 && device->vid == 0x054c && device->pid == 0x0268 &&
+                         device->out_count;
+    const int ep_max = (feed->nintendo || feed->gip || feed->ds4_out || ds3_sony) ? 2 : 1;
     /* ep[1] is left zeroed on purpose: usb_send_out() owns the OUT buffers and
      * refuses to write through an endpoint that already has pointers installed. */
     memset(&init, 0, sizeof init);
@@ -1050,6 +1121,9 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
         (void)usb_release_fd(feed);
         return 0;
     }
+    feed->in_xfer_len = (op.max_packet_length > 0 && op.max_packet_length <= USB_REPORT)
+                            ? op.max_packet_length : USB_REPORT;
+    feed->lenp = feed->in_xfer_len;
     if (feed->nintendo) {
         memset(&op, 0, sizeof op);
         op.ep_index = 1;
@@ -1065,6 +1139,96 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
         usb_nintendo_kick(feed);
         feed->hs_state = HS_WAIT_81_01;
         feed->nintendo_seq = 1;
+    }
+    if (feed->ds3) {
+        const int operational = ds3_set_operational_usb(feed->fd, (uint8_t)device->interface_number);
+        log_line("usb: %s DS3 operational=%d", device->path, operational);
+        if (operational != 0 && device->kind == GC_USB_INTERFACE_HID && device->layout.count) {
+            /* Not answering as a DS3 (e.g. a PS3-labelled wireless dongle that
+             * reports as a plain HID gamepad): decode it from its descriptor
+             * instead of handing every report to the DS3 parser. */
+            log_line("usb: %s DS3 start-up failed; using generic HID", device->path);
+            feed->ds3 = 0;
+        }
+        if (feed->ds3 && ds3_sony) {
+            /* An OEM DS3 tested on a PS5 launch model (FW 11.40) kept its IN
+             * pipe silent after 0xF2/0xF5 alone. Adding the PS3's own enable
+             * (SET_REPORT feature 0xF4 = 42 0c 00 00) and the LED-1 output
+             * report on the OUT pipe made it stream (which of the two is
+             * required was not isolated). That pad's LEDs stayed dark even
+             * though the LED report was accepted, possibly because it is a
+             * clone (manufacturer string "Sony?"). Pads with other IDs keep
+             * the plain 0xF2/0xF5 sequence. */
+            uint8_t enable[4] = { 0x42, 0x0c, 0x00, 0x00 };
+            const int en = usb_class_request(feed->fd, 0x21, 0x09, 0x03F4,
+                                             (uint16_t)device->interface_number,
+                                             enable, sizeof enable);
+            static const uint8_t led1[36] = {
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x02,                                   /* LED bitmap: LED 1 */
+                0xff, 0x27, 0x10, 0x00, 0x32,  0xff, 0x27, 0x10, 0x00, 0x32,
+                0xff, 0x27, 0x10, 0x00, 0x32,  0xff, 0x27, 0x10, 0x00, 0x32,
+                0x00, 0x00, 0x00, 0x00, 0x00 };
+            int led = -1;
+            memset(&op, 0, sizeof op);
+            op.ep_index = 1;
+            op.ep_no = device->out[0];
+            op.max_bufsize = 64;
+            op.max_frames = 1;
+            if (ioctl(feed->fd, USB_FS_OPEN, &op) == 0)
+                led = usb_send_out(feed->fd, &feed->ep[1], led1, sizeof led1, "ds3_led");
+            log_line("usb: %s DS3 enable(0xF4)=%d led=%d", device->path, en, led);
+        }
+    }
+    if (feed->ds4_out) {
+        memset(&op, 0, sizeof op);
+        op.ep_index = 1;
+        op.ep_no = device->out[0];
+        op.max_bufsize = 64;
+        op.max_frames = 1;
+        if (ioctl(feed->fd, USB_FS_OPEN, &op) == 0) {
+            /* USB output report 0x05: flags 0x07 = rumble | lightbar | flash,
+             * no rumble, PS4 player-1 blue, no flashing. */
+            static const uint8_t lightbar[32] = { 0x05, 0x07, 0x00, 0x00,
+                                                  0x00, 0x00, 0x00, 0x00, 0x40 };
+            const int sent = usb_send_out(feed->fd, &feed->ep[1], lightbar,
+                                          sizeof lightbar, "ds4_lightbar");
+            log_line("usb: %s DS4 lightbar set=%d", device->path, sent);
+        } else {
+            /* Input works without it; only the lightbar stays dark. */
+            log_line("usb: %s DS4 OUT open errno=%d (%s)", device->path, errno, strerror(errno));
+        }
+    }
+    if (feed->gip) {
+        memset(&op, 0, sizeof op);
+        op.ep_index = 1;
+        op.ep_no = device->out[0];
+        op.max_bufsize = sizeof feed->xbox.transfer_output;
+        op.max_frames = 1;
+        if (ioctl(feed->fd, USB_FS_OPEN, &op) != 0) {
+            log_line("usb: %s GIP OUT open errno=%d (%s)", device->path, errno, strerror(errno));
+            (void)usb_release_fd(feed);
+            return 0;
+        }
+        feed->xbox.out_available = 1;
+        /* Bounded (about 1.6 s): ANNOUNCE -> ACK -> power on, as the resident
+         * line does. A late ANNOUNCE is answered again in xbox_handle_packet. */
+        const int handshake = xbox_gip_handshake(feed->fd, feed->ep, device->vid, device->pid,
+                                                 &feed->xbox, NULL, NULL);
+        log_line("usb: %s GIP handshake result=%d", device->path, handshake);
+        if (handshake < 0) {
+            (void)usb_release_fd(feed);
+            return 0;
+        }
+        /* The handshake drove ep[0] with its own buffers; point it back. */
+        feed->ep[0].ppBuffer = (void **)&feed->bufp;
+        feed->ep[0].pLength = &feed->lenp;
+        feed->ep[0].nFrames = 1;
+        feed->ep[0].aFrames = 0;
+        feed->ep[0].status = 0;
+        feed->ep[0].timeout = 0;
+        feed->ep[0].flags = USB_FS_FLAG_SINGLE_SHORT_OK;
+        feed->lenp = feed->in_xfer_len;
     }
     snprintf(feed->path, sizeof feed->path, "%s", device->path);
     feed->vid = device->vid; feed->pid = device->pid; feed->kind = device->kind;
@@ -1263,8 +1427,8 @@ static void usb_tick(void)
                 memset(reply, 0, sizeof reply);
                 poll.ucr_data = reply;
                 poll.ucr_flags = USB_SHORT_XFER_OK;
-                poll.ucr_request.bmRequestType = 0x81;      /* device to host, class */
-                poll.ucr_request.bRequest = 6;              /* GET_REPORT */
+                poll.ucr_request.bmRequestType = 0xA1;      /* device to host, class, interface */
+                poll.ucr_request.bRequest = 0x01;           /* HID GET_REPORT */
                 USETW(poll.ucr_request.wValue, (uint16_t)(0x0100u | report_id));
                 USETW(poll.ucr_request.wIndex, (uint16_t)devices[i].interface_number);
                 USETW(poll.ucr_request.wLength, (uint16_t)sizeof reply);
@@ -1274,7 +1438,12 @@ static void usb_tick(void)
                 if (noted++ < 4)
                     log_line("usb: %s GET_REPORT id=%#x rc=%d actlen=%d errno=%d",
                              devices[i].path, report_id, rc, poll.ucr_actlen, poll_errno);
-                if (rc == 0 &&
+                /* Some pads answer GET_REPORT with all zeros until they stream;
+                 * decoded, that reads as a held D-pad and pinned sticks. */
+                int reply_nonzero = 0;
+                for (int k = 0; rc == 0 && k < poll.ucr_actlen && k < (int)sizeof reply; ++k)
+                    reply_nonzero |= reply[k];
+                if (rc == 0 && reply_nonzero &&
                     poll.ucr_actlen > 0 && (size_t)poll.ucr_actlen <= sizeof reply) {
                     memcpy(feed->report, reply, (size_t)poll.ucr_actlen);
                     feed->lenp = (uint32_t)poll.ucr_actlen;
@@ -1291,7 +1460,7 @@ static void usb_tick(void)
             }
         }
         if (!feed->busy) {
-            feed->lenp = USB_REPORT;
+            feed->lenp = feed->in_xfer_len ? feed->in_xfer_len : USB_REPORT;
             feed->ep[0].nFrames = 1;
             feed->ep[0].aFrames = 0;
             feed->ep[0].status = 0;
