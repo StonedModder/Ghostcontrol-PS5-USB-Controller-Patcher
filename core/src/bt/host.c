@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static const pad_output k_player_colours[HOST_MAX_PADS] = {
     { 0, 0, 0x00, 0x00, 0x40, 1 },      /* blue */
@@ -230,7 +231,30 @@ db_rec *db_find(host_t *h, const unsigned char *addr)
 /* The store file: a magic string, then one fixed-size record per pad:
  *   addr 6, key 16, key type 1, vid 2, pid 2, le 1, addr type 1, ediv 2,
  *   rand 8, irk 16, has irk 1, padding */
-void db_save(host_t *h)
+/* Pairing can run before the UI has created the service's state directory. */
+static int db_make_parent(const char *path)
+{
+    char parent[300];
+    if (strlen(path) >= sizeof parent) { errno = ENAMETOOLONG; return 0; }
+    strcpy(parent, path);
+    char *last = strrchr(parent, '/');
+    if (!last) return 1;
+    if (last == parent) return 1;
+    *last = '\0';
+    for (char *at = parent + 1; ; ++at) {
+        if (*at && *at != '/') continue;
+        char saved = *at;
+        *at = '\0';
+        struct stat st;
+        if (mkdir(parent, 0755) != 0 && (errno != EEXIST || stat(parent, &st) != 0 || !S_ISDIR(st.st_mode)))
+            return 0;
+        *at = saved;
+        if (!saved) break;
+    }
+    return 1;
+}
+
+int db_save(host_t *h)
 {
     char tmp[300];
     FILE *f;
@@ -240,9 +264,10 @@ void db_save(host_t *h)
      * store, never half of one. */
     snprintf(tmp, sizeof tmp, "%s.new", h->db_path);
     f = fopen(tmp, "wb");
+    if (!f && errno == ENOENT && db_make_parent(h->db_path)) f = fopen(tmp, "wb");
     if (!f) {
         log_line("store: cannot write %s: errno %d", tmp, errno);
-        return;
+        return 0;
     }
     fwrite(DB_MAGIC, 1, 8, f);
     for (i = 0; i < h->ndb; i++) {
@@ -268,7 +293,9 @@ void db_save(host_t *h)
     if (!ok || rename(tmp, h->db_path) != 0) {
         log_line("store: could not save %s: errno %d", h->db_path, errno);
         remove(tmp);
+        return 0;
     }
+    return 1;
 }
 
 static void db_load(host_t *h)
@@ -1502,6 +1529,7 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
     case 0x0F:  /* Command Status: status, credits, opcode */
         if (len >= 6 && le16(ev + 4) == OP_INQUIRY) {
             log_line("inquiry: controller answered status %#04x", ev[2]);
+            if (ev[2] == 0) ((host_storage *)h)->inquiry_backoff = 0;
             if (ev[2] != 0) {
                 host_storage *bs = (host_storage *)h;
                 /* Refused: the radio is busy (the system's driver has it).
@@ -1615,9 +1643,10 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
             db_rec *r = db_put(h, ev + 2);
             memcpy(r->key, ev + 8, 16);
             r->type = ev[24];
-            db_save(h);
+            const int saved = db_save(h);
+            log_line("pad %s: paired, %s", addr_str(ev + 2),
+                     saved ? "key stored" : "key only in memory; reconnect after restart requires pairing");
         }
-        log_line("pad %s: paired, key stored", addr_str(ev + 2));
         break;
 
     case 0x31:  /* IO Capability Request */
@@ -1783,7 +1812,7 @@ static void start_inquiry(host_t *h)
         h->inquiring = 1;
         bs->t_inquiry = now_ms();
         bs->inquiry_at = 0;
-        bs->inquiry_backoff = 0;
+        /* Reset the backoff only when the controller accepts the inquiry. */
         log_line("inquiry: started");
     } else {
         static int fails;
