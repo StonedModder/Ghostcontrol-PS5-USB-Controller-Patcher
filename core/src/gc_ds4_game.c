@@ -805,8 +805,11 @@ int gc_ds4_game_rumble(const GcDs4GameBridge *bridge, unsigned route,
             gc_remote_read(bridge->pid, address, &second, sizeof(second))) return -1;
         if (first.sequence == second.sequence && !(second.sequence & 1u)) {
             *sequence = second.sequence;
-            *large = second.large;
-            *small = second.small;
+            /* The first payload is bracketed by the two sequence reads.
+             * A writer can start after the second copy reads its sequence,
+             * so that copy's payload is not protected by this check. */
+            *large = first.large;
+            *small = first.small;
             return 0;
         }
     }

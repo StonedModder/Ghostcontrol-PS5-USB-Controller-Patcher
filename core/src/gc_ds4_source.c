@@ -44,6 +44,7 @@ typedef struct {
     intptr_t fp_close;
     intptr_t fp_get_handle, fp_open, fp_is_ds4;
     intptr_t fp_clock_gettime;
+    intptr_t fp_controller_info;
     volatile uint64_t owner_deadline_ns;
     uint64_t thread_id;
     int32_t owner_pid;
@@ -80,6 +81,8 @@ gc_ds4_reader_stub(void *argument)
     GcRemoteHandle get_handle = (GcRemoteHandle)(uintptr_t)args->fp_get_handle;
     GcRemoteClose is_ds4 = (GcRemoteClose)(uintptr_t)args->fp_is_ds4;
     int (*get_time)(clockid_t, struct timespec *) = (void *)(uintptr_t)args->fp_clock_gettime;
+    int32_t (*controller_info)(int32_t, void *) =
+        (void *)(uintptr_t)args->fp_controller_info;
     uint32_t owner_countdown = args->owner_check_interval;
     uint32_t scan_cursor = 0;
 
@@ -99,7 +102,12 @@ gc_ds4_reader_stub(void *argument)
             if (!already) {
                 int32_t handle = get_handle(user, 0, pad_index);
                 ScePadData probe;
-                if (handle > 0 && is_ds4(handle) > 0 &&
+                uint8_t info[32];
+                /* A failed or short controller-info response must not classify
+                 * a local pad as a RemotePlay source during hotplug. */
+                for (unsigned i = 0; i < sizeof(info); ++i) info[i] = 0xff;
+                if (handle > 0 && controller_info &&
+                    !controller_info(handle, info) && info[10] == 2 && is_ds4(handle) > 0 &&
                     !read_state(handle, &probe) && probe.connected) {
                     int duplicate = 0;
                     for (unsigned slot = 0; slot < args->source_count; ++slot)
@@ -324,6 +332,27 @@ probe_device_identity(GcRemoteSession *session,
     return 0;
 }
 
+/* Only RemotePlay-session pads belong to this bridge. Local USB pads are
+ * owned by the USB service, even when RemotePlay exposes their DS4 identity. */
+static int
+probe_connection_type(GcRemoteSession *session,
+                      const GcDs4SourceSymbols *symbols,
+                      intptr_t scratch, int32_t handle, uint8_t *type)
+{
+    uint8_t info[32];
+    int64_t result = -1;
+    memset(info, 0xff, sizeof(info));
+    if (!symbols->controller_info || !type ||
+        gc_remote_write(session->pid, scratch, info, sizeof(info)) != 0 ||
+        remote_call(session, symbols->controller_info,
+                    (uint32_t)handle, (uint64_t)scratch, 0, 0,
+                    &result) != 0 || result != 0 ||
+        gc_remote_read(session->pid, scratch, info, sizeof(info)) != 0)
+        return -1;
+    *type = info[10];
+    return 0;
+}
+
 static int
 discover_sources(GcRemoteSession *session,
                  const GcDs4SourceSymbols *symbols,
@@ -366,7 +395,14 @@ discover_sources(GcRemoteSession *session,
             int public_identity = probe_device_identity(
                 session, symbols, scratch, handle, &vendor, &product) == 0 &&
                 gc_ds4_is_known(1, vendor, product);
-            int verified = read_ok && (public_identity || is_ds4 > 0);
+            uint8_t connection_type = 0xff;
+            int remote_pad = probe_connection_type(
+                session, symbols, scratch, handle, &connection_type) == 0 &&
+                connection_type == 2;
+            int verified = read_ok && (public_identity || is_ds4 > 0) && remote_pad;
+            if (read_ok && (public_identity || is_ds4 > 0) && !remote_pad)
+                source_log("skipped handle=0x%08x connection_type=%u (requires 2)\n",
+                    (uint32_t)handle, connection_type);
 
             int duplicate = 0;
             for (uint32_t slot = 0; slot < args->source_count; ++slot) {
@@ -489,6 +525,7 @@ start_in_process(pid_t pid, const int32_t *user_ids, size_t user_count,
     args.fp_open = 0;
     args.fp_is_ds4 = symbols.is_ds4;
     args.fp_clock_gettime = symbols.clock_gettime;
+    args.fp_controller_info = symbols.controller_info;
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now)) goto done;
     args.owner_deadline_ns = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
