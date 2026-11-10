@@ -11,6 +11,11 @@ followed by messages claiming keys were stored. The store now creates missing
 parent directories and returns success or failure. Both pairing paths distinguish
 persisted keys from keys available only in memory for the current process.
 
+Explicit forget now checks that result too: the host returns failure and logs
+that the controller was forgotten only in memory when the rewrite fails. The
+old disk record remains and may return after restart. The service's asynchronous
+request acknowledgement is not proof that the host persisted the operation.
+
 The Xbox LE capture contains 412 inquiry status `0x0c` responses. Although the
 host already computed exponential backoff, sending the next inquiry reset it
 before its status arrived. Backoff now resets on successful controller acceptance,
@@ -18,9 +23,11 @@ so repeated refusals wait 500, 1000, 2000, 4000 and then at most 8000 ms.
 
 `python3 -B tools/tests/test_log_regressions.py` compiles the actual production
 store and inquiry routines on a host. It exercises missing and existing parent
-directories, record serialization, replacement, an invalid parent, repeated
-refusals, the retry cap and successful acceptance. It mocks the radio and clock;
-it does not test Bluetooth hardware or physical pairing.
+directories, record serialization, replacement, an invalid parent, successful
+and failed forgets, reloads and retry after a blocked rewrite. It also checks
+unknown/closing requests, link identity selection, repeated inquiry refusals,
+the retry cap and successful acceptance. It mocks the radio and clock; it does
+not test Bluetooth hardware or physical pairing.
 
 ## Guitar: Lemos's beta 2.2.5 with PR #29 and PR #32
 

@@ -356,7 +356,7 @@ void init_tick(host_t *h, link_t *l, long now);
 db_rec *db_find(host_t *h, const unsigned char *addr);
 db_rec *db_put(host_t *h, const unsigned char *addr);
 int db_save(host_t *h);
-void db_forget(host_t *h, const unsigned char *addr);
+int db_forget(host_t *h, const unsigned char *addr);
 
 /* le.c */
 void le_setup(host_t *h);

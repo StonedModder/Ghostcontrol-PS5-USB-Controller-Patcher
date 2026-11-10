@@ -343,14 +343,19 @@ db_rec *db_put(host_t *h, const unsigned char *addr)
     return d;
 }
 
-void db_forget(host_t *h, const unsigned char *addr)
+int db_forget(host_t *h, const unsigned char *addr)
 {
     db_rec *d = db_find(h, addr);
 
-    if (!d) return;
+    if (!d) return 0;
     memmove(d, d + 1, sizeof *d * (size_t)(h->ndb - (d - h->db) - 1));
     h->ndb--;
-    db_save(h);
+    if (!db_save(h)) {
+        log_line("store: forgot %s in memory but could not persist: errno %d",
+                 addr_str(addr), errno);
+        return 0;
+    }
+    return 1;
 }
 
 /* ---- GATT cache: per-pad discovery results, so reconnections skip the
@@ -2032,7 +2037,10 @@ int host_forget(host_t *h, const unsigned char addr[6])
         if (l->used && memcmp(link_identity(l), addr, 6) == 0)
             link_disconnect(h, l, "forgotten from the web page");
     }
-    db_forget(h, addr);
+    if (!db_forget(h, addr)) {
+        log_line("pad %s: forgotten in memory; store write failed", addr_str(addr));
+        return 0;
+    }
     log_line("pad %s: forgotten", addr_str(addr));
     return 1;
 }
