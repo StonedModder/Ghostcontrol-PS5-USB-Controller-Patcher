@@ -66,3 +66,44 @@ still requires a real game request, matched controller handle, relay return code
 and tester observation. No such hardware confirmation is claimed here.
 
 Original logs are not included: they contain tester and console identifiers.
+
+## Follow-up: test1 and Experimental test 2
+
+The new archive contains an app-service log and a vpad log for each session.
+The supplied description says the Experimental variant includes PRs 29, 32 and
+33 plus their review fixes; its source commit/artifact and console firmware were
+not supplied, so that composition cannot be independently confirmed.
+
+- Both vpad logs contain 24 logged successful completions with 27-byte input
+  reports from `12ba:0100`. These are logged samples, not a throughput count or
+  proof of complete guitar mapping.
+- Test 2 contains 54 sampled EBUSY diagnostic lines, with the sample counter
+  reaching 2432. The recorded tuple stays fd 12, interface 0, endpoint 81,
+  poll flags `0x41`, one requested frame, zero completed frames, requested/current
+  length 64 and endpoint status zero. A failed completion's metadata is not a
+  successful endpoint result. No timing, transfer-size or recovery change follows
+  from these snapshots alone.
+- Both sessions record `AddDevice 0x803b0006`, then zero kernel-log bytes, lines,
+  MBus events and candidates during identification. No binding success is
+  recorded. The code is preserved as an observed return value, not assigned an
+  unverified error meaning. The decimal parser cannot match events never read.
+- Both show a disconnected handle closing after ENOTTY and the receiver opening
+  again. Successful post-reconnect input/binding is not established.
+- No `040b:0897` device identifier appears in these files. Its open-failure
+  rate limiting and continued open attempts are not verified by this archive.
+
+PR 29 adds checked nonblocking kernel-log setup and per-identification transport
+diagnostics (AddDevice result, bytes, lines, device events, candidates, EOF and
+read errno), without changing USB transfers or uncertain-device ownership.
+
+For the next test, provide the Experimental source commit and artifact hash,
+console model/firmware/loader, kernel-log provider/configuration, and whether
+the Toolbox was open. Capture the new identification summary. Establish log
+delivery and virtual-device binding before evaluating labeled fret/strum/whammy
+inputs in a game. Capture successful/error completion totals and last successful
+input times across unplug/replug; sampled failures alone cannot establish a stall.
+Include a separate `040b:0897` session to test its retry/log rate behavior.
+
+The EBUSY root cause and guitar gameplay remain NOT VERIFIED. Raw logs are not
+committed. The Experimental instrumented source is still needed before porting
+or modifying that instrumentation.
