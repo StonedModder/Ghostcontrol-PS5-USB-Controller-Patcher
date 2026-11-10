@@ -107,3 +107,34 @@ Include a separate `040b:0897` session to test its retry/log rate behavior.
 The EBUSY root cause and guitar gameplay remain NOT VERIFIED. Raw logs are not
 committed. The Experimental instrumented source is still needed before porting
 or modifying that instrumentation.
+
+## Additional capture: Cosmic Byte Blitz with inactive controls
+
+The separate vpad file has four sessions (timestamp resets). The physical pad
+is reported as a Cosmic Byte Blitz; the captured USB identity is `057e:2009`
+and the traffic completes Nintendo handshakes and reaches `0x30` reports. The
+tester reports a blocked profile-selection screen and no working buttons.
+Which screen, exact build and selected controller mode remain unconfirmed.
+
+Each session records `AddDevice 0x803b0006` followed by binding return zero.
+Therefore the AddDevice value alone must not be labeled a creation failure.
+Binding is still not proof that buttons work. The final session records
+post-disconnect FS_START errno 25; this does not establish successful recovery.
+Descriptor reads also fail with errno 5 in the capture. Compare the exact build
+against PR 32's cache/retirement work before assigning those failures a new cause.
+
+PR 29 reproduces and fixes premature input publication: protocol handshakes and
+rejected known-protocol packets must not use the generic HID neutral-learning
+fallback. In the capture a virtual pad is announced after the first handshake,
+before its first `0x30` control report. The fix retains generic HID learning and
+valid Nintendo control decoding, with host regression coverage. It does not
+establish that this defect explains all of the tester's inactive controls.
+
+Retest the updated combined build, identify the blocked screen, and capture
+timestamped neutral/button press/release payloads, decoded button values,
+InsertData results and the selected user. Check startup, hotplug and reconnect,
+plus generic HID custom setup. Keep the controller's documented mode fixed for
+each session and record its observed identity. No guessed mapping, forced mode
+change or USB-transfer change is justified by the current report-ID-only log.
+Controller gameplay, the complete profile-selection failure and EBUSY remain
+NOT VERIFIED.
