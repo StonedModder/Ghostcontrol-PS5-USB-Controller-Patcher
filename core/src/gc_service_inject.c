@@ -863,6 +863,7 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
 {
     ScePadData decoded = feed->decoded;
     int ok;
+    int allow_raw_learning = 0;
     /* Bring-up trace: reports either arrive and decode, or they never arrive.
      * Without this the two look identical from outside ("no input"). */
     {
@@ -891,6 +892,7 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
         ds4_is_compatible_vidpid(device->vid, device->pid))
         ok = ds4_handle_packet(-1, NULL, feed->report, feed->lenp, &decoded);
     else if (device->kind == GC_USB_INTERFACE_HID) {
+        allow_raw_learning = 1;
         source_snapshot_lock();
         GcHidState physical = source_hid_values[feed->slot];
         if (!hid_layout_same(&source_hid_layout[feed->slot], &device->layout)) {
@@ -930,6 +932,9 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
     } else
         return 0; /* An unknown protocol is not a DS4 report. */
     if (!ok) {
+        /* Known-protocol handshakes, skipped packets and decode failures are
+         * not control samples. Only generic HID needs the learner fallback. */
+        if (!allow_raw_learning) return 0;
         /* A descriptor that declares no standard usages yields no fields, and
          * with no saved profile yet there is nothing to map. The report is
          * still real input from a real device: publish a neutral state so the

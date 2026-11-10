@@ -62,3 +62,40 @@ Toolbox was open. Capture the new identification summary and verify delivery of
 kernel-log events before blaming the parser. Check binding and labeled guitar
 controls separately. The supplied logs do not establish firmware, build identity,
 physical mapping or gameplay success. The EBUSY cause remains unresolved.
+
+## Switch-protocol input gate: Cosmic Byte Blitz report
+
+The additional vpad log contains four sessions identifying as `057e:2009`:
+Nintendo handshakes, `0x30` input packets and a successful bind in each session.
+The tester identifies the physical pad as a Cosmic Byte Blitz and reports no
+working buttons at a profile-selection screen. The exact screen and selected
+controller mode remain unconfirmed; a USB identity does not establish the
+physical model or its currently selected XInput mode.
+
+In these sessions `AddDevice 0x803b0006` precedes successful binding, so that
+return value alone is not proof that creation failed. This is distinct from the
+guitar's zero-byte identification windows.
+
+A host regression reproduces a concrete input-gating defect: `usb_decode`
+promoted Nintendo handshake packets (handler result zero) to neutral, readable
+input through the generic HID learner fallback. The capture likewise announces
+a virtual pad after the first `0x81` handshake, before the first `0x30` report.
+The fallback now applies only to generic HID learning. Nintendo handshakes,
+protocol errors and rejected DS4/XInput packets do not publish fake control
+samples or erase the cached decoded state. Actual decoded input remains valid.
+
+`python3 -B tools/tests/test_usb_input_gate.py` compiles the production USB decode
+routine, Nintendo handler and Nintendo parsers, mocking transport/profile/HID
+dependencies. It checks handshake progress without publication, valid button
+press/release, truncated packets, OUT failure, rejected/accepted DS4/XInput
+parser results and retained generic HID learning. This runs in CI. It is not a
+replay of button bytes from the tester: the capture logs report IDs and lengths,
+not the control payload needed to establish this pad's mapping.
+
+Retest with the exact updated build and identify whether the blocked screen is
+the PS5 user picker or Ghostcontrol's profile page. Record neutral/press/release
+raw bytes, decoded buttons, InsertData results and user routing. Test startup
+and hotplug, including an already-held button, then release and unplug/replug.
+Check a generic HID controller's custom setup still works. Do not force a VID/PID
+rename, XInput parser or guessed mapping. This fixes premature publication but
+does not establish resolution of all inactive controls, reconnect faults or EBUSY.
