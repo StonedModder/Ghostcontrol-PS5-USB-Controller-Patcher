@@ -122,6 +122,9 @@ static int g_matches;
 static uint64_t g_match_dev;
 static int g_log_fd = -1, g_log_is_dev;
 static int g_log_close_uncertain;
+static unsigned long g_log_bytes, g_log_lines, g_log_events;
+static int g_log_eof, g_log_read_errno;
+static int32_t g_add_result;
 static char g_line[LINE_MAX_LEN];
 static size_t g_line_len;
 
@@ -167,7 +170,12 @@ static int log_source_open(void)
         sin.sin_port = htons(3232);
         sin.sin_addr.s_addr = inet_addr("127.0.0.1");
         if (connect(fd, (struct sockaddr *)&sin, sizeof sin) == 0) {
-            fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+            const int flags = fcntl(fd, F_GETFL);
+            if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+                log_line("vpad: TCP kernel log nonblocking setup failed: errno %d", errno);
+                if (close(fd) != 0) g_log_close_uncertain = 1;
+                return -1;
+            }
             g_log_is_dev = 0;
             return fd;
         }
@@ -254,7 +262,13 @@ static void log_source_read(void)
 
     for (rounds = 0; rounds < 8 && g_log_fd >= 0; rounds++) {
         ssize_t n = read(g_log_fd, buf, sizeof buf), i;
-        if (n <= 0) return;
+        if (n <= 0) {
+            if (n == 0) g_log_eof = 1;
+            else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                g_log_read_errno = errno;
+            return;
+        }
+        g_log_bytes += (unsigned long)n;
         for (i = 0; i < n; i++) {
             uint64_t dev;
             if (buf[i] != '\n' && g_line_len < sizeof g_line - 1) {
@@ -263,6 +277,8 @@ static void log_source_read(void)
             }
             g_line[g_line_len] = '\0';
             g_line_len = 0;
+            ++g_log_lines;
+            if (strstr(g_line, "DEVICE_ADDED")) ++g_log_events;
             if (g_log_is_dev) log_line("klog: %s", g_line);  /* kept, not lost */
             dev = virtual_device_in(g_line);
             if (!dev || g_pending < 0) continue;
@@ -273,6 +289,25 @@ static void log_source_read(void)
             if (g_matches == 0 || dev != g_match_dev) g_matches++;
         }
     }
+}
+
+/* Report the transport separately from matching: zero bytes cannot test a parser. */
+static void log_identification_result(int slot)
+{
+    log_line("vpad: slot %d identification source=%s add_rc=%#x bytes=%lu lines=%lu device_added=%lu candidates=%d eof=%d read_errno=%d",
+             slot, g_log_is_dev ? "/dev/klog" : "TCP:3232", (unsigned)g_add_result,
+             g_log_bytes, g_log_lines, g_log_events, g_matches, g_log_eof, g_log_read_errno);
+    if (g_matches != 0) return;
+    if (g_log_read_errno)
+        log_line("vpad: kernel log read failed; check the log source before device matching");
+    else if (g_log_eof && !g_log_is_dev)
+        log_line("vpad: TCP kernel log stream ended; check the log server");
+    else if (!g_log_bytes)
+        log_line("vpad: kernel log supplied no bytes; device matching was not exercised");
+    else if (!g_log_events)
+        log_line("vpad: no DEVICE_ADDED event received during identification");
+    else
+        log_line("vpad: DEVICE_ADDED events received but no virtual DualSense matched");
 }
 
 /* ---- users and privileges ---------------------------------------------------- */
@@ -494,6 +529,8 @@ static void start_identification(int slot)
     log_source_read();                  /* what came before is not ours */
     g_matches = 0;
     g_match_dev = 0;
+    g_log_bytes = g_log_lines = g_log_events = 0;
+    g_log_eof = g_log_read_errno = 0;
 
     /* The parameter block as the PS5 accepts it: size 32, user 1,
      * the rest marked so that a call writing into it shows in the log. */
@@ -501,6 +538,7 @@ static void start_identification(int slot)
     param[0] = (int32_t)sizeof param;
     param[1] = 1;
     r = scePadVirtualDeviceAddDevice(param, VIRTUAL_DEVICE_DUALSENSE);
+    g_add_result = r;
     log_line("slot %d: AddDevice %#x, block %08x %08x %08x %08x %08x %08x", slot, (unsigned)r,
              (unsigned)param[2], (unsigned)param[3], (unsigned)param[4], (unsigned)param[5],
              (unsigned)param[6], (unsigned)param[7]);
@@ -518,6 +556,7 @@ static void finish_identification(long now)
     if (g_matches == 0 && now - g_t_add < T_IDENTIFY) return;
     if (g_matches == 1 && now - g_t_match < T_AMBIGUITY && now - g_t_add < T_IDENTIFY) return;
 
+    log_identification_result(slot);
     g_pending = -1;
     log_source_close();
     if (g_matches != 1) {

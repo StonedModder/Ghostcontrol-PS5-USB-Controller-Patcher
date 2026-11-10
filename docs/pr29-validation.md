@@ -4,6 +4,10 @@
 
 Run `python3 -B tools/tests/test_virtual_device.py` and
 `python3 -B tools/tests/test_ds4_bridge.py` on a host with Python 3 and a C compiler.
+Run `python3 -B tools/tests/test_vpad_log_source.py` for the production kernel-log
+reader. It reproduces unchecked nonblocking setup, then checks setup failures,
+bounded reads, EOF/read errors, matching versus absent/unrelated events, and
+descriptor-close uncertainty. These checks run in the parser workflow too.
 The latter compiles the actual source selector, resident reader, bridge relay,
 and game vibration stub against host fakes, with warnings treated as errors.
 It covers startup and hotplug selection for connection types 0, 1, 2 and 255,
@@ -36,3 +40,25 @@ Before merging, validate the following with a USB DS4 and a wireless DS4:
    vibrating. Confirm motors stop and controller ownership recovers.
 6. Unplug the USB DS4 during reads. Confirm ENOTTY closes the dead feed and
    interrupt transfers resume correctly after reconnection.
+
+## Guitar follow-up captures
+
+Both new sessions record successful 27-byte input reports for `12ba:0100`, but
+also `AddDevice 0x803b0006` and an identification window with zero kernel-log
+bytes/candidates. The Experimental session samples EBUSY with ready flags
+`0x41`, no completed frames and the requested length still 64. Those are
+snapshots after a failed completion call, not a successful endpoint result.
+
+The reader now refuses a TCP socket whose nonblocking setup failed, and reports
+the AddDevice result alongside byte/line/event counts, EOF and read errno. A
+zero-byte window is distinguished from events that fail to match. Identification
+still waits and preserves uncertain ownership: the AddDevice return alone is
+not used to guess a handle, delete a pad, grant credentials or force a retry.
+The USB transfer mechanism is unchanged.
+
+For the next console run, record firmware/loader, the exact Experimental source
+commit and artifact hash, kernel-log provider/configuration, and whether the
+Toolbox was open. Capture the new identification summary and verify delivery of
+kernel-log events before blaming the parser. Check binding and labeled guitar
+controls separately. The supplied logs do not establish firmware, build identity,
+physical mapping or gameplay success. The EBUSY cause remains unresolved.
