@@ -1820,6 +1820,11 @@ static void start_inquiry(host_t *h)
         /* Reset the backoff only when the controller accepts the inquiry. */
         log_line("inquiry: started");
     } else {
+        host_storage *bs = (host_storage *)h;
+        /* A failed send has no Command Status to schedule the next attempt. */
+        bs->inquiry_backoff = bs->inquiry_backoff ? bs->inquiry_backoff * 2 : T_INQUIRY_RETRY;
+        if (bs->inquiry_backoff > T_INQUIRY_RETRY_MAX) bs->inquiry_backoff = T_INQUIRY_RETRY_MAX;
+        bs->inquiry_at = now_ms() + bs->inquiry_backoff;
         static int fails;
         if (fails++ < 5) log_line("inquiry: the command could not be sent");
     }

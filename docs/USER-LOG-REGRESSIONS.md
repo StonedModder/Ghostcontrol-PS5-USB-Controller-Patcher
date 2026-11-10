@@ -138,3 +138,36 @@ each session and record its observed identity. No guessed mapping, forced mode
 change or USB-transfer change is justified by the current report-ID-only log.
 Controller gameplay, the complete profile-selection failure and EBUSY remain
 NOT VERIFIED.
+
+## Additional Bluetooth capture: pairing remains visible at user selection
+
+The two supplied app-service files are byte-identical; count them as one capture.
+The vpad file includes a timestamp reset and multiple pairing/retry attempts.
+The LE controller reports `045e:0b22`, reaches ready-as-Xbox state and binds a
+virtual pad successfully in four recorded attempts. The tester says input works
+after turning something off, but whether that means search, the Toolbox or the
+controller's physical pairing mode has not been established.
+
+The trace has 412 refused inquiry status responses, repeated bond-store errno 2
+failures followed by misleading keys-stored messages, and a failed forget rewrite
+followed by a success message. Those are precisely behaviors the existing PR 33
+changes address. This capture does not verify those changes on console; establish
+the exact source/build before treating it as a regression in the updated PR.
+Pairing timeouts and encryption failures are also recorded; no single cause is
+assigned to them from these logs.
+
+The related code audit found a further retry gap: a command-send failure has no
+Command Status event to schedule backoff, so the polling loop could retry every
+tick. Failed sends now schedule the same 500 ms to 8 s capped backoff as refused
+commands. A regression reproduces the missing delay, then checks growth, cap and
+reset only after controller acceptance. This is a tested error-path fix, not a
+claim that send failures caused this tester's reported pairing/user-picker issue.
+
+Retest a build including the current PR 33 storage and retry fixes. Record the
+exact time and meaning of the action that restores input. Compare search active
+versus expired and Toolbox open versus closed in separate sessions, keeping the
+controller mode fixed. Record pair completion, first input, bind and InsertData
+results and the selected user. Do not automatically stop discovery on readiness:
+the search window can support additional controllers, and a ready link is not
+proof that the physical controller has left pairing mode. Input behavior at user
+selection and the reported workaround remain NOT VERIFIED by these captures.

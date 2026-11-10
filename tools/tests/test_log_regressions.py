@@ -41,8 +41,9 @@ void link_disconnect(host_t *h, link_t *l, const char *why) {
 static long clock_ms;
 long now_ms(void) { return clock_ms; }
 typedef struct { host_t host; long t_inquiry, inquiry_at; int inquiry_backoff; } host_storage;
+static int send_ok = 1;
 int send_cmd(host_t *h, unsigned op, const void *data, int size) {
-    (void)h; (void)op; (void)data; (void)size; return 1;
+    (void)h; (void)op; (void)data; (void)size; return send_ok;
 }
 STORE
 FIND
@@ -119,6 +120,21 @@ int main(void) {
     start_inquiry(&state.host);
     inquiry_status(&state.host, 0);
     assert(state.inquiry_backoff == 0 && state.host.inquiring);
+    state = (host_storage){0};
+    send_ok = 0;
+    for (int i = 0; i < 8; ++i) {
+        start_inquiry(&state.host);
+        int expected = T_INQUIRY_RETRY << (i < 4 ? i : 4);
+        assert(!state.host.inquiring);
+        assert(state.inquiry_backoff == expected);
+        assert(state.inquiry_at == clock_ms + expected);
+        clock_ms = state.inquiry_at;
+    }
+    send_ok = 1;
+    start_inquiry(&state.host);
+    assert(state.host.inquiring && state.inquiry_backoff == T_INQUIRY_RETRY_MAX);
+    inquiry_status(&state.host, 0);
+    assert(state.inquiry_backoff == 0);
     return 0;
 }
 '''.replace('STORE', store).replace('FIND', find).replace('LOAD', load).replace('HOST_FORGET', host_forget).replace('FORGET', forget).replace('IDENTITY', identity).replace('START', start).replace('STATUS', status)
