@@ -1,5 +1,7 @@
 # Upstream clones; fetched by tools/fetch-deps.sh and pinned in tools/deps.lock
 ui/vendor/
+
+# Read-only copy of the UI kit sources for local reference reading
 ui/kit-reference/
 
 # Build output
@@ -8,17 +10,13 @@ core/.build/
 core/src/**/*.o
 ui/.build/
 ui/dist/
-.build/
+/.build/
 __pycache__/
-*.o
-*.elf
 
-# Per-build identity
+# Per-build identity, regenerated on every build
 ui/.title-id
-.commandcode
+/.commandcode
 
-# Local / OS
-.DS_Store
-*.log
-*.bak
-media/raw/
+audit/
+# generated XMB art previews (rebuild with tools/make-xmb-art.sh)
+ui/sce_sys/preview/

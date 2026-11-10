@@ -2,7 +2,7 @@
 
 ## Current native integration
 
-`ui/Makefile` uses the pinned blackbearreloaded UI-kit driver through
+`ui/Makefile` uses the pinned homebrew UI-kit driver through
 `tools/compose-kit-root.sh`; the separate service is built by
 `GhosttoothAPI/Makefile` / `tools/build-app-service.sh native`, not OpenProspero.
 The baseline default is the full resident. The separately selected additive

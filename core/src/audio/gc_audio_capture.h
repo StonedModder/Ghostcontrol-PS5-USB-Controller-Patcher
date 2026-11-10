@@ -169,7 +169,7 @@ typedef struct {
  * properly aligned for the backend's byte view. */
 typedef struct {
     int in_use;
-    int closing;                 /* close in progress: not a usable handle */
+    int closing;                 
     int reading;
     int cancelled;
     int started;

@@ -344,12 +344,6 @@ static int32_t main_user(void)
     return vpad_choose_user(login, init, fore, want);
 }
 
-/* System-service credentials. LEGACY: on firmware 13.60 the whole virtual-pad
- * path (create, identify via the log server, bind, insert, delete) works in a
- * plain process — console-verified in audit/typed-ordinary-console/. The raise
- * is therefore OFF by default and kept only for explicitly raising builds
- * (GC_VPAD_RAISE_CREDS=1) and for the credential unit tests. The MBus note
- * below is history: "MBus refuses a plain payload" dates from firmware 10.01. */
 #ifndef GC_VPAD_RAISE_CREDS
 #define GC_VPAD_RAISE_CREDS 0
 #endif

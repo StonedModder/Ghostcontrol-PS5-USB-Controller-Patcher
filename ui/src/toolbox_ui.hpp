@@ -24,6 +24,7 @@
 #include "ui/fonts.hpp"
 #include "ui/motion.hpp"
 
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -32,6 +33,57 @@
 
 namespace ghostcontrol
 {
+
+/* ---- guided-setup capture gate -----------------------------------------
+ * A guided walk leases the pad one control at a time: SETUP_STATUS reports
+ * `active` (a draft is open) and `target` (the control it is asking for). Only
+ * that pair means "the next press of this control belongs to the wizard". The
+ * shell has its own verb on the same bits -- CIRCLE is Action::back and CROSS
+ * is Action::confirm -- so it has to be able to tell a capture from review.
+ * These are pure predicates over the SETUP_STATUS body, so the host test can
+ * prove the gate without a UI or GPU harness. */
+
+/** The control a live capture is asking for, or empty when nothing is being
+ *  captured. `active` with an empty target is the review state: the draft is
+ *  open but the pad is not leased, so every shell verb keeps working. Older
+ *  producers send -1 as their integer "unarmed"; that is review too. */
+inline std::string_view setup_capture_target(std::string_view setup_json)
+{
+    if (json_raw_value(setup_json, "active") != "true") return {};
+    const auto target = json_value(setup_json, "target");
+    if (target.empty() || target == "null") return {};
+    int number = 0;
+    const auto parsed = std::from_chars(target.data(), target.data() + target.size(), number);
+    if (parsed.ec == std::errc{} && parsed.ptr == target.data() + target.size() && number < 0)
+        return {};
+    return target;
+}
+
+/** True while a guided/manual capture is armed and owns the pad. */
+inline bool setup_capture_armed(std::string_view setup_json)
+{
+    return !setup_capture_target(setup_json).empty();
+}
+
+/** Circle is Action::back, so ungated it opened the page menu on every press
+ *  the wizard was counting: the prompt was replaced by the menu and the CIRCLE
+ *  step could not be completed from the pad. Cross survived because it is
+ *  Action::confirm. Suppress global back navigation only while a capture is
+ *  armed -- every idle and review state keeps Circle = Back, so the page menu
+ *  still opens everywhere else. */
+inline bool setup_capture_blocks_back(std::string_view setup_json)
+{
+    return setup_capture_armed(setup_json);
+}
+
+/** The symmetric case: Cross is Action::confirm, so while the walk asks for
+ *  CROSS a press is one of its confirmations and must not activate a focused
+ *  row. Capturing another control leaves confirm alone, which keeps the Setup
+ *  page's Cancel row (and the menu/picker verbs) reachable from the pad. */
+inline bool setup_capture_blocks_confirm(std::string_view setup_json)
+{
+    return setup_capture_target(setup_json) == "CROSS";
+}
 
 /** One QR plate the host uploaded: the texture plus the pixel size it was
  *  created at. A zero texture means "not in this build", and the card says so
@@ -394,6 +446,11 @@ class ToolboxUi
      * atomic pair; the core refuses a lone ARM with setup_not_begun. Empty until
      * a controller is chosen this session. */
     std::string setup_selection_;
+    /* This frame's capture state, resolved once in update() from SETUP_STATUS:
+     * the footer stops advertising a Circle navigation the gate refuses, and
+     * the blocked-press toast names the control the wizard is counting. */
+    bool setup_capture_ = false;
+    bool setup_capture_circle_ = false;
     float clock_ = 0.0f;
 };
 

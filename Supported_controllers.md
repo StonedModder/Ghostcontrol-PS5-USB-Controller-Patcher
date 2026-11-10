@@ -11,7 +11,7 @@ For how to add new devices, see [othercontrollersGuide.md](othercontrollersGuide
 | Controller | Mode | VID:PID | Parser / path | Notes |
 |------------|------|---------|---------------|-------|
 | 8BitDo Ultimate 2 | Nintendo Switch Pro | `057e:2009` | Nintendo / Manba Switch | Original confirmed path; IN `0x81`, 64-byte reports |
-| 8BitDo Ultimate 2C Wireless (81HD) | XInput | `2dc8:310a` | Manba XUSB (reuse) | Composite device: IN `0x84`, OUT `0x05` (not classic `0x81`/`0x01`). USB-C cable and 2.4G dongle. Merged in [#19](https://github.com/StonedModder/Ghostcontrol-PS5-USB-Controller-Patcher/pull/19). |
+| 8BitDo Ultimate 2C Wireless (81HD) | XInput | `2dc8:310a` | Manba XUSB (reuse) | Composite device: IN `0x84`, OUT `0x05` (not classic `0x81`/`0x01`). USB-C cable and 2.4G dongle.. |
 
 ---
 

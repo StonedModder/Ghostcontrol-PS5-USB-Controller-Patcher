@@ -382,6 +382,7 @@ Section build_screen_bluetooth();
 Section build_screen_profiles();
 Section build_screen_lightfx();
 Section build_screen_service();
+Section build_screen_updates();
 Section build_screen_diagnostics();
 Section build_screen_donate();
 Section build_screen_about();

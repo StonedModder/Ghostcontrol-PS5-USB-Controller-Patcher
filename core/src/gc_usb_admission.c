@@ -9,7 +9,6 @@
 
 #include <stddef.h>
 
-/* ── Skip table (Ghostpad-main/src/controller/controller.c:100-109) ─────── */
 
 int gc_usb_admission_skip(uint8_t device_class, uint8_t interface_class,
                           uint8_t interface_subclass, uint8_t interface_protocol)
@@ -81,12 +80,6 @@ static const GcUsbFamilyPair g_family_pairs[] = {
     { 0x046d, 0xc21f, GC_USB_FAMILY_LOGITECH },
 };
 
-/* GIP interface signature. The drop checks subclass/protocol alone
- * (Ghostpad-main/src/controller/controller.c:141-142, constants at
- * Ghostpad-main/src/include/controller.h:92-94); we require interface class
- * 0xff as well, which is what our accepted classifier does
- * (core/src/gc_usb.h:24, core/src/gc_main.c:823-824). The stricter reading is
- * used here, and the gate pins the difference. */
 #define GIP_INTERFACE_CLASS    0xffu
 #define GIP_INTERFACE_SUBCLASS 0x47u
 #define GIP_INTERFACE_PROTOCOL 0xd0u
@@ -172,9 +165,6 @@ typedef struct {
     const char *reason;
 } GcRouteEntry;
 
-/* The template. Four candidate routes, none enabled: enabling one would be a
- * resident admission change, which is an owner decision that has not been taken
- * (audit/ghostpad-intake/EVALUATION.md, P4 scope limit). */
 static const GcRouteEntry g_route_template[] = {
     { GC_USB_FAMILY_GIP,      GC_USB_ROUTE_TARGET_XBOX,     0, ROUTE_REASON },
     { GC_USB_FAMILY_DS3,      GC_USB_ROUTE_TARGET_DS3,      0, ROUTE_REASON },

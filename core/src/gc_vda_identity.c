@@ -41,9 +41,6 @@ const char *gc_vda_identity_refusal(GcVdaPlatform platform,
          * rather than as unevidenced. */
         return platform == GC_VDA_PLATFORM_PS5 ? NULL : REFUSAL_PLATFORM;
     case GC_VDA_IDENTITY_DS4:
-        /* The drop's own comment records the refusal on their PS4 path
-         * (Ghostpad-main/src/main.c:204-207); on PS5 their code only ever asks
-         * for type 3, so there is no datapoint either way. */
         return platform == GC_VDA_PLATFORM_PS4 ? REFUSAL_DS4
                                                : REFUSAL_NO_EVIDENCE;
     case GC_VDA_IDENTITY_PSVR2_LEFT:
@@ -71,5 +68,5 @@ int gc_vda_type_value(GcVdaPlatform platform, GcVdaIdentity identity)
 {
     if (!gc_vda_identity_available(platform, identity))
         return GC_VDA_TYPE_NONE;
-    return 3;   /* Ghostpad-main/src/main.c:208, core/src/bt/ps5_vpad.c:65 */
+    return 3;   
 }

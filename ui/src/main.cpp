@@ -6,10 +6,8 @@
 // Desired output comes from the resident companion over worker-owned local-console
 // IPC. No network exchange or remote-process handle is used on the frame thread.
 //
-// Drawn with blackbearreloaded/ps5-homebrew-ui. Its ten-foot rules are not
-// optional and are followed here: layout in the 1920x1080 virtual canvas, a
-// 96 px side safe area, body text at 24 and above, and a hint row that says
-// what the buttons do. See docs/UI-DESIGN.md.
+// Layout uses the 1920x1080 virtual canvas, a 96 px side safe area, body text
+// at 24 and above, and a hint row for button actions. See docs/UI-DESIGN.md.
 
 #include "app_log.hpp"
 #include "audio/cues.hpp"

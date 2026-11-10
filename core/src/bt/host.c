@@ -27,6 +27,32 @@ typedef struct {
     int lost_connections;
     int setup_scan_uncertain;
 
+    /* Identities learned from inquiry responses during this run, and never
+     * written anywhere: the console's own pads are recognised again on the
+     * next start by asking the radio, not by trusting a file. */
+    unsigned char ban[HOST_BAN_MAX][6];
+    int n_ban;
+    int ban_full;                   /* the list is full: no more blind calls */
+
+    /* A gamepad found without an identity: the answer is waited for, once. */
+    unsigned char defer_rec[14];
+    long defer_at;                  /* when it was found; 0: none */
+
+    /* The last pad called, for a bounded fresh-link retry. */
+    unsigned char last_call[14];
+    long repage_at;                 /* when the next call is due; 0: none */
+    int in_repage;
+    int fresh_left;                 /* links that may be made again this search */
+
+    /* Addresses that answered "connection already exists", not called again
+     * for a while. */
+    struct { unsigned char addr[6]; long until; } hold[4];
+    int hold_next;
+
+    /* The inquiry command in flight, and the wait after a refused one. */
+    long t_inquiry;
+    long inquiry_at;
+    long inquiry_backoff;
 } host_storage;
 
 static int *classic_acl(host_t *h, const link_t *l)
@@ -507,6 +533,8 @@ static void chan_check_open(link_t *l, chan *c)
 {
     if (c->st == CH_CONFIG && c->cfg_ours_ok && c->cfg_theirs_ok) {
         chan_set(c, CH_OPEN);
+        c->refused = 0;
+        c->retry_at = 0;
         log_line("pad %s: channel %#x open", addr_str(l->addr), c->psm);
     }
 }
@@ -515,6 +543,9 @@ static void chan_connect(host_t *h, link_t *l, chan *c)
 {
     unsigned char r[4];
 
+    /* A pad that refused this channel is asked again only after its wait:
+     * one refusal must not turn into a request per poll. */
+    if (now_ms() < c->retry_at) return;
     chan_set(c, CH_CONNECTING);
     put16(r, c->psm);
     put16(r + 2, c->scid);
@@ -600,8 +631,29 @@ static void on_signaling(host_t *h, link_t *l, const unsigned char *d, int len)
             if (!ch || ch->st != CH_CONNECTING) break;
             if (le16(c + 4) == 1) break;            /* pending */
             if (le16(c + 4) != 0) {
-                log_line("pad %s: channel %#x refused (%u)", addr_str(l->addr), ch->psm, le16(c + 4));
+                unsigned result = le16(c + 4);
+                long delay = 250L << (ch->refused < 4 ? ch->refused : 4);
+                log_line("pad %s: channel %#x refused (%u), trying again in %ld ms",
+                         addr_str(l->addr), ch->psm, result, delay);
+                ch->refused++;
                 chan_set(ch, CH_CLOSED);
+                ch->retry_at = now_ms() + delay;
+                /* "No resources" for SDP over and over on a link just made:
+                 * the pad is busy with something of its own (field reports on
+                 * an 8BitDo). A fresh link works at once, so it is made
+                 * instead of waiting out every refusal -- at most
+                 * FRESH_LINK_TRIES per search, and the search is not
+                 * stretched for it. */
+                if (result == 4 && ch->psm == PSM_SDP && l->pairing && ch->refused >= 3 &&
+                    ((host_storage *)h)->fresh_left > 0 &&
+                    memcmp(((host_storage *)h)->last_call, l->addr, 6) == 0) {
+                    ((host_storage *)h)->fresh_left--;
+                    ((host_storage *)h)->repage_at = now_ms() + T_FRESH_LINK;
+                    link_disconnect(h, l, "no resources for a channel: a fresh link is made");
+                    break;
+                }
+                if (ch->refused >= CHAN_REFUSED_MAX)
+                    link_disconnect(h, l, "channel refused eight times");
                 break;
             }
             ch->dcid = le16(c);
@@ -898,7 +950,7 @@ static int send_output(host_t *h, link_t *l)
     unsigned char buf[128];
     int n;
 
-    if (!l->ready || !l->prof->build_output) return 0;
+    if (!l->ready || !l->prof || !l->prof->build_output) return 0;
     n = l->prof->build_output(l->pctx.bytes, &l->out, buf + 1, (int)sizeof buf - 1);
     if (n <= 0) return 0;
     l->t_out = now_ms();
@@ -969,7 +1021,7 @@ void link_ready(host_t *h, link_t *l)
     pad_info info;
 
     host_origin origin = captured_origin(h, l);
-    if (h->dead || h->closing || !origin.occurrence) return;
+    if (h->dead || h->closing || !origin.occurrence || !l->prof) return;
     l->ready = 1;
     fill_pad_info(h, l, &info);
     log_line("pad %s: ready as %s in slot %d", addr_str(l->addr), l->prof->name, slot_of(h, l));
@@ -985,7 +1037,7 @@ void init_tick(host_t *h, link_t *l, long now)
     unsigned char buf[128];
     int n;
 
-    if (l->init_done || !l->prof->init_report) return;
+    if (l->init_done || !l->prof || !l->prof->init_report) return;
     if (l->init_step < 0) {                     /* between rounds */
         if (l->full) l->init_done = 1;
         else if (now - l->t_init >= T_INIT_RETRY) l->init_step = 0;
@@ -1067,7 +1119,125 @@ static void on_acl(host_t *h, const unsigned char *pkt, int len)
     }
 }
 
-/* ---- HCI events ----------------------------------------------------------- */
+/* ---- HCI events: who a pad says it is, before any connection ------------- */
+
+/* The class of device in an inquiry record (or a Connection Request). */
+static uint32_t cod_of(const unsigned char *rec)
+{
+    return (uint32_t)rec[8] | (uint32_t)rec[9] << 8 | (uint32_t)rec[10] << 16;
+}
+
+/* Sony's own pads for the console: the DualSense and the DualSense Edge. The
+ * system pairs and keeps them, and a second host pairing breaks the console's
+ * own link. They are never paged, whatever the profile table lists. */
+static int model_is_dualsense(unsigned vid, unsigned pid)
+{
+    return vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2);
+}
+
+/* The model a pad announces before any connection: the extended inquiry
+ * response's Device ID record, type 0x10 (source 1, vendor 2, product 2,
+ * version 2 -- the length byte counts the type as well, so 8). */
+static int eir_device_id(const unsigned char *eir, int n, unsigned *vid, unsigned *pid)
+{
+    int i;
+
+    if (!eir) return 0;
+    for (i = 0; i + 1 < n && eir[i] > 0 && i + 1 + eir[i] <= n; i += 1 + eir[i]) {
+        if (eir[i + 1] == 0x10 && eir[i] >= 8) {
+            /* length, type, source, vendor (2), product (2), version (2) */
+            *vid = le16(eir + i + 3);
+            *pid = le16(eir + i + 5);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The pad's name from its inquiry response (complete name wins over the short
+ * one), "" if it sent none. */
+static void eir_name(const unsigned char *eir, int n, char *out, int max)
+{
+    int i;
+
+    out[0] = 0;
+    if (!eir) return;
+    for (i = 0; i + 1 < n && eir[i] > 0 && i + 1 + eir[i] <= n; i += 1 + eir[i]) {
+        int type = eir[i + 1], len = eir[i] - 1;
+        if ((type == 0x09 || type == 0x08) && len > 0) {
+            if (len > max - 1) len = max - 1;
+            memcpy(out, eir + i + 2, (size_t)len);
+            out[len] = 0;
+            if (type == 0x09) return;
+        }
+    }
+}
+
+/* Whether an extended answer carries at least one whole field. An empty one is
+ * the case where the model is still unknown. */
+static int eir_has_fields(const unsigned char *eir, int n)
+{
+    return eir && n >= 2 && eir[0] > 0 && 1 + eir[0] <= n;
+}
+
+/* Addresses the radio told us belong to the console's own pads, for this run
+ * only. Nothing about this list is written to the store. */
+static int is_banned(host_t *h, const unsigned char *addr)
+{
+    int i;
+
+    for (i = 0; i < ((host_storage *)h)->n_ban; i++)
+        if (memcmp(((host_storage *)h)->ban[i], addr, 6) == 0) return 1;
+    return 0;
+}
+
+/* An address that answered "connection already exists" is not called again
+ * straight away: the answer says the chip still holds that link, and calling
+ * it again in the same poll would be a create/fail loop on a shared radio. */
+static int is_held(host_t *h, const unsigned char *addr)
+{
+    long now = now_ms();
+    int i;
+
+    for (i = 0; i < 4; i++)
+        if (((host_storage *)h)->hold[i].until > now &&
+            memcmp(((host_storage *)h)->hold[i].addr, addr, 6) == 0) return 1;
+    return 0;
+}
+
+static void hold_add(host_t *h, const unsigned char *addr)
+{
+    host_storage *bs = (host_storage *)h;
+    int i = bs->hold_next++ & 3;
+
+    memcpy(bs->hold[i].addr, addr, 6);
+    bs->hold[i].until = now_ms() + T_EXIST_HOLD;
+}
+
+static void ban_add(host_t *h, const unsigned char *addr)
+{
+    host_storage *bs = (host_storage *)h;
+
+    if (is_banned(h, addr)) return;
+    if (bs->n_ban >= HOST_BAN_MAX) {
+        if (!bs->ban_full) log_line("inquiry: exclusion list full; no pad is called without an identity");
+        bs->ban_full = 1;
+        return;
+    }
+    memcpy(bs->ban[bs->n_ban++], addr, 6);
+}
+
+/* A call already made to an address that turned out to be excluded is
+ * cancelled, never allowed to complete. */
+static void cancel_call_to(host_t *h, const unsigned char *addr)
+{
+    link_t *l = link_by_addr(h, addr);
+
+    if (!l || l->connected || !l->remote_pending || l->cancel_sent) return;
+    l->cancel_sent = 1;
+    send_cmd(h, OP_CREATE_CONNECTION_CANCEL, addr, 6);
+    log_line("pad %s: the pending call is cancelled: it is a DualSense", addr_str(addr));
+}
 
 static void pair_with(host_t *h, const unsigned char *rec)
 {
@@ -1085,6 +1255,10 @@ static void pair_with(host_t *h, const unsigned char *rec)
         return;
     }
     l->pairing = 1;
+    l->cod = cod_of(rec);
+    memcpy(((host_storage *)h)->last_call, rec, sizeof ((host_storage *)h)->last_call);
+    if (!((host_storage *)h)->in_repage)
+        ((host_storage *)h)->fresh_left = FRESH_LINK_TRIES;
     if (h->inquiring) send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
 
     memcpy(p, rec, 6);
@@ -1099,41 +1273,92 @@ static void pair_with(host_t *h, const unsigned char *rec)
 }
 
 /* An inquiry record: addr 6, page scan mode 1, reserved 1, class 3,
- * clock offset 2, RSSI 1. */
-static void on_found(host_t *h, const unsigned char *rec)
+ * clock offset 2, RSSI 1. `eir` is the extended inquiry response when the
+ * result came with one, NULL for the older result events. */
+static void on_found(host_t *h, const unsigned char *rec, const unsigned char *eir, int eir_len)
 {
-    uint32_t cod = (uint32_t)rec[8] | (uint32_t)rec[9] << 8 | (uint32_t)rec[10] << 16;
+    uint32_t cod = cod_of(rec);
+    unsigned vid = 0, pid = 0;
+    int have_id = eir_device_id(eir, eir_len, &vid, &pid);
 
     if (now_ms() >= h->pair_until) return;
+    if (is_banned(h, rec)) return;                  /* already known: not looked at */
+    if (is_held(h, rec)) return;                    /* its stale link is still there */
     if (!profile_class_is_gamepad(cod)) {
         log_line("inquiry: %s class %06x is not a gamepad, ignored", addr_str(rec), (unsigned)cod);
         return;
     }
+    if (have_id && model_is_dualsense(vid, pid)) {
+        /* The console's own pad. Its identity is remembered for this run so
+         * later answers without an EIR are not paged either, and a call
+         * already made from an earlier, less complete answer is cancelled. */
+        static unsigned char last[6];
+        static long last_at;
+        if (memcmp(last, rec, 6) != 0 || now_ms() - last_at > 30000) {
+            memcpy(last, rec, 6);
+            last_at = now_ms();
+            log_line("inquiry: %s is a DualSense (%04x:%04x), left alone", addr_str(rec), vid, pid);
+        }
+        ban_add(h, rec);
+        cancel_call_to(h, rec);
+        if (((host_storage *)h)->defer_at && memcmp(((host_storage *)h)->defer_rec, rec, 6) == 0) {
+            ((host_storage *)h)->defer_at = 0;
+            log_line("inquiry: the wait for %s is dropped: it is a DualSense", addr_str(rec));
+        }
+        return;
+    }
+    /* An extended answer with no field at all says nothing about the model.
+     * Wait -- once, bounded -- for a complete answer before calling it. */
+    if (eir && !eir_has_fields(eir, eir_len)) {
+        host_storage *bs = (host_storage *)h;
+        if (!bs->defer_at) {
+            memcpy(bs->defer_rec, rec, sizeof bs->defer_rec);
+            bs->defer_at = now_ms();
+            log_line("inquiry: %s answered without data; waiting up to %d s for a complete answer",
+                     addr_str(rec), T_EIR_WAIT / 1000);
+        }
+        return;
+    }
+    if (((host_storage *)h)->ban_full && !have_id) {
+        log_line("inquiry: %s has no identity and the exclusion list is full; not called", addr_str(rec));
+        return;
+    }
+    if (((host_storage *)h)->defer_at && memcmp(((host_storage *)h)->defer_rec, rec, 6) == 0)
+        ((host_storage *)h)->defer_at = 0;
     log_line("found gamepad %s (class %06x)", addr_str(rec), (unsigned)cod);
     pair_with(h, rec);
+    {
+        link_t *nl = link_by_addr(h, rec);
+        if (nl) eir_name(eir, eir_len, nl->name, (int)sizeof nl->name);
+    }
 }
 
-/* "Connection already exists" while paging a pad means this controller still
- * holds a link to it from an earlier run that ended without closing it (the
- * payload was started again over a running one, or crashed). Nothing else
- * uses this controller, and the pad would otherwise stay unreachable until
- * the chip is reset. Handles are small numbers: ask to close each; the
- * controller answers "unknown handle" to all but the real ones. Once a
- * minute at most. */
-static void purge_stale_links(host_t *h)
+/* "Connection already exists" while paging a pad. The radio is shared with the
+ * system's driver, so an unknown handle can be the console's own DualSense
+ * link: handles are never swept, and a link is never closed on a guess. */
+static void report_existing_link(host_t *h, const unsigned char *addr)
 {
-    unsigned char p[3];
-    unsigned handle;
-
     if (h->purge_at && now_ms() - h->purge_at < 60000) return;
     h->purge_at = now_ms();
-    log_line("an earlier run left a link open on the controller; closing stale links");
-    for (handle = 0; handle < 0x100; handle++) {
-        if (link_by_handle(h, handle)) continue;        /* ours, in use */
-        put16(p, handle);
-        p[2] = 0x13;                    /* remote user terminated */
-        send_cmd(h, OP_DISCONNECT, p, 3);
-    }
+    log_line("pad %s: a connection already exists and the controller named no handle for it; "
+             "left alone (it may be the console's own link)", addr_str(addr));
+}
+
+/* The one "connection already exists" answer that names a handle: a Connection
+ * Complete with status 0x0B carrying the existing link's handle for the address
+ * this process was paging. That link is the one we asked for, so it -- and only
+ * it -- is closed, to make the next call succeed. */
+static void close_named_existing_link(host_t *h, link_t *l, unsigned handle)
+{
+    unsigned char p[3];
+
+    if (!l->pairing || !l->remote_pending || l->connected || handle == 0 || handle > 0x0EFF) return;
+    if (is_banned(h, l->addr)) return;
+    put16(p, handle);
+    p[2] = 0x13;                        /* remote user terminated */
+    send_cmd(h, OP_DISCONNECT, p, 3);
+    log_line("pad %s: connection already exists on handle %#05x, the link this process asked for: closing it",
+             addr_str(l->addr), handle);
 }
 
 static void on_event(host_t *h, const unsigned char *ev, int len)
@@ -1159,16 +1384,17 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
             rec[7] = 0;
             memcpy(rec + 8, r + 9, 5);
             rec[13] = 0;
-            on_found(h, rec);
+            on_found(h, rec, NULL, 0);
         }
         break;
 
     case 0x22:  /* Inquiry Result with RSSI */
-        for (i = 0; i < ev[2] && 3 + (i + 1) * 14 <= len; i++) on_found(h, ev + 3 + i * 14);
+        for (i = 0; i < ev[2] && 3 + (i + 1) * 14 <= len; i++)
+            on_found(h, ev + 3 + i * 14, NULL, 0);
         break;
 
-    case 0x2F:  /* Extended Inquiry Result */
-        if (len >= 17) on_found(h, ev + 3);
+    case 0x2F:  /* Extended Inquiry Result: record, then its response */
+        if (len >= 17) on_found(h, ev + 3, ev + 17, len - 17);
         break;
 
     case 0x04:  /* Connection Request: addr, class, link type */
@@ -1197,6 +1423,12 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
     case 0x03:  /* Connection Complete: status, handle, addr, type, enc */
         if (len < 13 || !(l = link_by_addr(h, ev + 5)) || l->connected) break;
         if (ev[2] != 0) {
+            if (ev[2] == 0x0B) {
+                unsigned named = le16(ev + 3) & 0x0FFF;
+                hold_add(h, l->addr);
+                if (named) close_named_existing_link(h, l, named);
+                else report_existing_link(h, l->addr);
+            }
             log_line("pad %s: connection failed (status %#04x)", addr_str(l->addr), ev[2]);
             link_free(h, l);
             break;
@@ -1270,7 +1502,25 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
     case 0x0F:  /* Command Status: status, credits, opcode */
         if (len >= 6 && le16(ev + 4) == OP_INQUIRY) {
             log_line("inquiry: controller answered status %#04x", ev[2]);
-            if (ev[2] != 0) h->inquiring = 0;
+            if (ev[2] != 0) {
+                host_storage *bs = (host_storage *)h;
+                /* Refused: the radio is busy (the system's driver has it).
+                 * Nothing is re-sent before the wait doubles. */
+                h->inquiring = 0;
+                bs->inquiry_backoff = bs->inquiry_backoff ? bs->inquiry_backoff * 2 : T_INQUIRY_RETRY;
+                if (bs->inquiry_backoff > T_INQUIRY_RETRY_MAX) bs->inquiry_backoff = T_INQUIRY_RETRY_MAX;
+                bs->inquiry_at = now_ms() + bs->inquiry_backoff;
+            }
+        }
+        if (len >= 6 && le16(ev + 4) == OP_INQUIRY_CANCEL && ev[2] != 0) {
+            /* "Command disallowed" to a cancel is the controller saying no
+             * inquiry is running, which is exactly the state a lost Inquiry
+             * Complete left us believing otherwise. Either way the flag is
+             * cleared and the next poll may start one; the watchdog timer is
+             * not re-armed here, so a controller that keeps refusing is only
+             * asked again at the watchdog interval. */
+            if (h->inquiring) log_line("inquiry: cancel refused (status %#04x): no inquiry is running", ev[2]);
+            if (ev[2] == 0x0C) h->inquiring = 0;
         }
         if (len >= 6 && (le16(ev + 4) == 0x200D || le16(ev + 4) == 0x200E)) {
             /* LE owns cancellation/backoff, including refused Create. The
@@ -1284,7 +1534,16 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
             break;
         }
         if (len < 6 || ev[2] == 0) break;
-        if (le16(ev + 4) == OP_CREATE_CONNECTION && ev[2] == 0x0B) purge_stale_links(h);
+        if (le16(ev + 4) == OP_CREATE_CONNECTION && ev[2] == 0x0B) {
+            /* A Command Status names no handle, and the radio is shared:
+             * nothing is closed on this answer. The links it refers to are
+             * retired below, so the search moves on. */
+            for (i = 0; i < HOST_MAX_PADS; i++)
+                if (h->links[i].used && h->links[i].pairing && !h->links[i].connected) {
+                    hold_add(h, h->links[i].addr);
+                    report_existing_link(h, h->links[i].addr);
+                }
+        }
         if (le16(ev + 4) == OP_CREATE_CONNECTION || le16(ev + 4) == 0x200D) {
             int want_le = le16(ev + 4) == 0x200D;
             for (i = 0; i < HOST_MAX_PADS; i++) {
@@ -1317,11 +1576,22 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
         break;
 
     case 0x16:  /* PIN Code Request: legacy pairing */
-        if (len < 8 || !link_by_addr(h, ev + 2)) break;
+        if (len < 8 || !(l = link_by_addr(h, ev + 2))) break;
         memset(p, 0, sizeof p);
         memcpy(p, ev + 2, 6);
-        p[6] = 4;
-        memcpy(p + 7, "0000", 4);
+        /* Nintendo's Wii pads paired with their Sync button take the host's
+         * own address as their PIN, its 6 bytes as read from the controller.
+         * Every other pad keeps the legacy "0000" and Classic Simple Pairing
+         * behaviour, which these pads never reach. */
+        if (strncmp(l->name, "Nintendo RVL-", 13) == 0 || l->cod == 0x002504) {
+            p[6] = 6;
+            memcpy(p + 7, h->bdaddr, 6);
+            log_line("pad %s: PIN requested; answering with this controller's address (Wii pads)",
+                     addr_str(l->addr));
+        } else {
+            p[6] = 4;
+            memcpy(p + 7, "0000", 4);
+        }
         send_cmd(h, OP_PIN_CODE_REPLY, p, 23);
         break;
 
@@ -1508,7 +1778,12 @@ static void start_inquiry(host_t *h)
     static const unsigned char inq[5] = { 0x33, 0x8B, 0x9E, 0x08, 0x00 };
 
     if (send_cmd(h, OP_INQUIRY, inq, 5)) {
+        host_storage *bs = (host_storage *)h;
+
         h->inquiring = 1;
+        bs->t_inquiry = now_ms();
+        bs->inquiry_at = 0;
+        bs->inquiry_backoff = 0;
         log_line("inquiry: started");
     } else {
         static int fails;
@@ -1557,8 +1832,50 @@ void host_poll(host_t *h, int timeout_ms)
         h->reset_tried = 0;
     }
 
-    /* Keep searching through the pairing window, one pad at a time. */
-    if (now < h->pair_until && !h->inquiring && !linking) start_inquiry(h);
+    {
+        host_storage *bs = (host_storage *)h;
+
+        /* A gamepad found with no identity in its answer: the wait is over,
+         * so it is called now (bounded, never indefinite). */
+        if (bs->defer_at && now - bs->defer_at >= T_EIR_WAIT) {
+            unsigned char rec[14];
+            memcpy(rec, bs->defer_rec, sizeof rec);
+            bs->defer_at = 0;
+            log_line("found gamepad %s; no complete answer came in time, calling it", addr_str(rec));
+            pair_with(h, rec);
+            linking = 0;
+            for (i = 0; i < HOST_MAX_PADS; i++)
+                if (h->links[i].used && h->links[i].pairing && !h->links[i].ready &&
+                    !h->links[i].le)
+                    linking = 1;
+        }
+        /* A pad that had no channel resources gets one fresh link, once. */
+        if (bs->repage_at && now >= bs->repage_at) {
+            unsigned char rec[14];
+            memcpy(rec, bs->last_call, sizeof rec);
+            bs->repage_at = 0;
+            bs->in_repage = 1;
+            pair_with(h, rec);
+            bs->in_repage = 0;
+            linking = 0;
+            for (i = 0; i < HOST_MAX_PADS; i++)
+                if (h->links[i].used && h->links[i].pairing && !h->links[i].ready &&
+                    !h->links[i].le)
+                    linking = 1;
+        }
+        /* An inquiry that outlived any inquiry: its completion was lost on
+         * the shared radio. Ask for the end; a refused cancel says it already
+         * ended, and the flag is cleared either way by the answer. */
+        if (h->inquiring && now - bs->t_inquiry > T_INQUIRY_WATCHDOG) {
+            bs->t_inquiry = now;        /* asked again at most once per interval */
+            log_line("inquiry: no completion after %d s, ending it", T_INQUIRY_WATCHDOG / 1000);
+            send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+        }
+        /* Keep searching through the pairing window, one pad at a time. */
+        if (now < h->pair_until && !h->inquiring && !linking && !bs->repage_at &&
+            !bs->defer_at && now >= bs->inquiry_at)
+            start_inquiry(h);
+    }
     if (now >= h->pair_until && h->inquiring) {
         send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
     }
@@ -1567,6 +1884,12 @@ void host_poll(host_t *h, int timeout_ms)
 int host_pair(host_t *h, int seconds)
 {
     if (h->dead || h->closing) return 0;
+    /* A new search starts from a clean slate: no wait inherited from the last
+     * one. The session's excluded addresses are kept -- they are identities
+     * of the console's own pads, not search state. */
+    ((host_storage *)h)->defer_at = 0;
+    ((host_storage *)h)->repage_at = 0;
+    ((host_storage *)h)->fresh_left = FRESH_LINK_TRIES;
     h->pair_until = now_ms() + (long)seconds * 1000;
     log_line("pairing: searching for %d s", seconds);
     return 1;

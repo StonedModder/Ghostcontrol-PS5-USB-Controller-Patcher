@@ -67,5 +67,5 @@ WiFi as a GhostPad client**. Presenting over USB would need separate silicon.
   `ProControllerResearch.md`, `othercontrollersGuide.md`,
   `Supported_controllers.md` — the protocol notes this repo's Nintendo path came
   from.
-- Nintendo bring-up on the service path: see `PROGRESS.md`, commit `4aa33df`.
-- Profile-as-data path for unknown pads: `PROGRESS.md`, commit `0be54cf`.
+- Nintendo bring-up on the service path: see project notes, commit `4aa33df`.
+- Profile-as-data path for unknown pads: project notes, commit `0be54cf`.

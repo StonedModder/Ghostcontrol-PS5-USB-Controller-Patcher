@@ -1,4 +1,4 @@
-# Ghostcontrol Toolbox 2.0 — native UI app on the blackbearreloaded kit.
+# Ghostcontrol Toolbox 2.0 — native UI app on the homebrew UI kit.
 # OpenProspero is not the driver. The UI kit links the app; GhosttoothAPI
 # is a separate ELF loaded on the console loader.
 #
@@ -23,7 +23,7 @@ HOST_TEST_CFLAGS ?= -D_DEFAULT_SOURCE -std=c11 -Wall -Wextra -Wshadow -Werror
 ROUND_TRIP_CFLAGS ?= -std=c11 -Wall -Wextra -Wshadow -Werror
 
 .DEFAULT_GOAL := app
-.PHONY: app deps compose companion-asset prune-dist title-id test test-usability test-shell deploy deploy-dry-run clean print-title-id pkg
+.PHONY: app deps compose companion-asset prune-dist title-id test test-usability test-shell test-setup-capture-gate deploy deploy-dry-run clean print-title-id pkg
 
 deps:
 	@GC_VENDOR_DIR=$(VENDOR) $(TOOLS)/fetch-deps.sh
@@ -101,7 +101,7 @@ pkg: app
 
 
 # Host tests only: the socket path needs a console with a service on it.
-test: test-completion test-usability test-qr-assets test-support-cards test-profile-features
+test: test-completion test-usability test-qr-assets test-support-cards test-profile-features test-setup-capture-gate
 	@mkdir -p $(TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -Isrc -o $(TEST_DIR)/gc-client-test \
 		tests/test_gc_client.c src/gc_client.c
@@ -226,6 +226,17 @@ test-shell:
 	GC_BETA_DISCLAIMER_UI_ROOT=$$(mktemp -d) \
 	GC_BINDING_TEST_FONT=$(UI_KIT)/assets/fonts/inter-regular.huifont \
 		$(TEST_DIR)/beta-disclaimer-ui-test
+
+# Guided-setup capture gate. The shell's back/confirm verbs are the pad's
+# CIRCLE/CROSS, so while SETUP_STATUS reports a capture the wizard owns those
+# presses. The predicate is pure (toolbox_ui.hpp), so this is a header-only
+# host check: no kit link, no GPU, no service.
+.PHONY: test-setup-capture-gate
+test-setup-capture-gate:
+	@mkdir -p $(TEST_DIR)
+	$(HOST_CXX) -std=c++20 -O2 -Wall -Wextra -Wshadow -Werror -Isrc -I$(UI_KIT)/src \
+		-o $(TEST_DIR)/setup-capture-gate-test tests/test_setup_capture_gate.cpp
+	$(TEST_DIR)/setup-capture-gate-test
 
 test-usability: test-shell
 	@mkdir -p $(TEST_DIR)
