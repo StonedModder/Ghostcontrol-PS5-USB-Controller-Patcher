@@ -4,7 +4,7 @@ jobs:
   host:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Bond storage and inquiry retry regression tests
         run: python3 -B tools/tests/test_log_regressions.py
       - name: Bluetooth host syntax
