@@ -171,3 +171,46 @@ results and the selected user. Do not automatically stop discovery on readiness:
 the search window can support additional controllers, and a ready link is not
 proof that the physical controller has left pairing mode. Input behavior at user
 selection and the reported workaround remain NOT VERIFIED by these captures.
+
+## sdlemos: new GH5 diagnostic captures and developer addendum
+
+Credit: [sdlemos](https://github.com/sdlemos) provided the console testing, logs,
+test report and GH5 developer addendum, reporting firmware 11.60 with the original
+PS3 `12ba:0100` receiver. These are tester-reported hardware details; no ELF hash
+or exact combined-source revision accompanied the captures.
+
+The four logs independently confirm the report's completion totals: the last
+COMPLETE_ok values for generations 1/2 are 1,594/1,719 (3,313 total) and
+1,055/1,439 (2,494 total). Both sessions explicitly disable VDA probing. Input
+continues between EBUSY returns, so the captures do not establish a permanent
+USB stall, the error's cause, virtual-pad binding or gameplay.
+
+Each RAW log has exactly 256 samples over 5,834/5,978 ms. There are 151/147
+27-byte reports and 105/109 three-byte replies. The current sample budget mixes
+control replies with interrupt data and stops too early for a full physical
+test sequence. Probe-disabled skips also appear in decode_rejected; that is not
+evidence that those reports failed a fret/strum decoder. Both logs show the
+Experimental progress instrumentation; separate Conservative execution is not
+established without build identity.
+
+PR 29 addresses the public-code findings: GET_REPORT is gated by recent valid
+interrupt reception, independent of decoded publication; retries have a minimum
+interval; state and counters belong to a connection and reset on slot reuse.
+Control replies no longer overwrite a potentially pending interrupt buffer or
+length. Existing request-format and all-zero safeguards from PR 32 are retained.
+Behavioral tests exercise the actual production fallback block, including
+RAW-only reception, quiet-device polling, failures, state reset and buffer
+preservation. The new fallback changes still require console validation.
+
+The Experimental-only logger/probe source and its local db_forget rollback were
+not supplied: test.zip and its extracted folder contain logs only. No local
+rollback has been overwritten or claimed reproduced. Completing that variant
+requires its source. Distinguish interrupt reception, probe-disabled skips,
+neutral probe frames, decoding and publication; label RAW report transport and
+generation, and use separate bounded/change-based capture windows so control
+replies cannot exhaust interrupt sampling. Do not claim those logger changes
+are implemented by the public PR.
+
+Next: record combined-source and ELF SHA-256, run RAW/probe-OFF and a separate
+clean VDA/probe-ON session, and preserve timed press/release sequences through
+reconnect. Full mapping, EBUSY root cause and game input remain NOT VERIFIED.
