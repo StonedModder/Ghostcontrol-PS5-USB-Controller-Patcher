@@ -8,7 +8,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'core/src/gc_service_inject.c').read_text()
-decode = source[source.index('static int usb_decode('):source.index('/* Switch Pro and compatibles:')]
+decode = source[source.index('static int usb_decode_report('):source.index('/* Switch Pro and compatibles:')]
 nintendo = (root / 'core/src/controller_nintendo.c').read_text()
 handler = nintendo[nintendo.index('int nintendo_handle_packet('):nintendo.rindex('#endif')]
 harness = r'''
@@ -25,7 +25,7 @@ struct usb_fs_endpoint { int unused; };
 enum { GC_USB_INTERFACE_HID=1, GC_USB_INTERFACE_HID_RAW=2, GC_USB_INTERFACE_XUSB=3 };
 typedef struct { int kind; uint16_t vid, pid; GcHidLayout layout; } GcUsbDevice;
 typedef struct {
-    ScePadData decoded; int fd, slot, nintendo, hs_state; uint8_t nintendo_seq;
+    ScePadData decoded; int fd, slot, nintendo, hs_state, gip, ds3, xbox; uint8_t nintendo_seq;
     struct usb_fs_endpoint ep[2]; uint8_t report[64]; uint32_t lenp; char path[32];
 } UsbFeed;
 static GcHidState source_hid_values[1];
@@ -54,6 +54,10 @@ static int ds4_handle_packet(int fd, void *ep, const uint8_t *data, uint32_t siz
     pad->buttons = SCE_PAD_BUTTON_CROSS; return 1;
 }
 #define mamba_xinput_handle_packet ds4_handle_packet
+#define ds3_handle_packet ds4_handle_packet
+int xbox_handle_packet(int fd, void *ep, const uint8_t *data, uint32_t size, ScePadData *pad, void *context) {
+    (void)context; return ds4_handle_packet(fd, ep, data, size, pad);
+}
 static int hid_layout_same(const GcHidLayout *a, const GcHidLayout *b) { return a->count == b->count; }
 int gc_hid_input(const GcHidLayout *layout, const uint8_t *data, size_t size, ScePadData *pad) {
     (void)layout; (void)data; (void)size; (void)pad; return 0;

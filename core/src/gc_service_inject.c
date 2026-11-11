@@ -12,6 +12,7 @@
 #include "gc_rawmap.h"
 #include "gc_types.h"
 #include "gc_usb.h"
+#include "gc_usb_fallback.h"
 #include "controller_ds4.h"
 #include "controller_mamba.h"
 #include "controller_nintendo.h"
@@ -236,6 +237,7 @@ typedef struct {
     uint8_t *bufp;
     uint32_t lenp;
     int busy;
+    GcUsbFallback fallback;
     /* Nintendo pads stay silent until 0x80 0x02 / 0x80 0x04 arrive, then speak
      * 0x30/0x3F. The handshake state machine is the resident line's proven one. */
     int nintendo;
@@ -859,7 +861,8 @@ static int slot_profile(int slot, GcProfile *out)
     return have;
 }
 
-static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state)
+static int usb_decode_report(UsbFeed *feed, const GcUsbDevice *device, pad_state *state,
+                             const uint8_t *report, uint32_t length)
 {
     ScePadData decoded = feed->decoded;
     int ok;
@@ -871,8 +874,8 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
         if (traced < 16) {
             ++traced;
             log_line("usb feed: slot %d len=%u id=%#x kind=%d",
-                     feed->slot, (unsigned)feed->lenp,
-                     (unsigned)(feed->lenp ? feed->report[0] : 0),
+                     feed->slot, (unsigned)length,
+                     (unsigned)(length ? report[0] : 0),
                      (int)device->kind);
         }
     }
@@ -880,17 +883,17 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
         /* The resident line's Nintendo state machine: it answers the 0x81
          * handshake reports by sending subcommands over the OUT pipe and only
          * then parses 0x30/0x3F. A generic HID decode never sees a report at all. */
-        const int handled = nintendo_handle_packet(feed->fd, feed->ep, feed->report,
-                                                   feed->lenp, &feed->hs_state,
+        const int handled = nintendo_handle_packet(feed->fd, feed->ep, report,
+                                                   length, &feed->hs_state,
                                                    &feed->nintendo_seq, &decoded);
         ok = handled > 0;
         if (handled < 0)
             log_line("usb: %s nintendo OUT failed (%s)", feed->path, strerror(errno));
     } else if (usb_xusb_qualified(device))
-        ok = mamba_xinput_handle_packet(-1, NULL, feed->report, feed->lenp, &decoded);
+        ok = mamba_xinput_handle_packet(-1, NULL, report, length, &decoded);
     else if ((device->kind == GC_USB_INTERFACE_HID || device->kind == GC_USB_INTERFACE_HID_RAW) &&
         ds4_is_compatible_vidpid(device->vid, device->pid))
-        ok = ds4_handle_packet(-1, NULL, feed->report, feed->lenp, &decoded);
+        ok = ds4_handle_packet(-1, NULL, report, length, &decoded);
     else if (device->kind == GC_USB_INTERFACE_HID) {
         allow_raw_learning = 1;
         source_snapshot_lock();
@@ -902,8 +905,8 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
             decoded.rightStick.x = decoded.rightStick.y = 128;
             decoded.quat.w = 1.0f;
         }
-        ok = gc_hid_input(&device->layout, feed->report, feed->lenp, &decoded) &&
-             gc_hid_state_update(&physical, &device->layout, feed->report, feed->lenp);
+        ok = gc_hid_input(&device->layout, report, length, &decoded) &&
+             gc_hid_state_update(&physical, &device->layout, report, length);
         /* Cache the descriptor even when the decode fails: a report with no
          * standard usages decodes to nothing (gc_hid_input returns 0), yet its
          * field layout is exactly what the setup learner needs to know which
@@ -926,7 +929,7 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
                 decoded.quat.w = 1.0f;
             }
             gc_profile_apply(&slot_prof, &decoded);
-            gc_rawmap_apply(&slot_prof, feed->report, feed->lenp, &decoded);
+            gc_rawmap_apply(&slot_prof, report, length, &decoded);
             ok = 1;   /* configured by profile, even when nothing mapped yet */
         }
     } else
@@ -941,7 +944,7 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
          * source counts as readable and Custom Controller Setup can learn its
          * raw bits. Without this the wizard refuses to list the only device it
          * could use to build the profile -- a deadlock, not a dead pad. */
-        if (feed->lenp > 0) {
+        if (length > 0) {
             memset(&decoded, 0, sizeof decoded);
             decoded.leftStick.x = decoded.leftStick.y = 128;
             decoded.rightStick.x = decoded.rightStick.y = 128;
@@ -962,6 +965,11 @@ static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state
     state->l2 = decoded.analogButtons.l2;
     state->r2 = decoded.analogButtons.r2;
     return 1;
+}
+
+static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state)
+{
+    return usb_decode_report(feed, device, state, feed->report, feed->lenp);
 }
 
 /* Switch Pro and compatibles: they answer nothing until the two 0x80 reports
@@ -1250,22 +1258,12 @@ static void usb_tick(void)
             describe_output(slot);
             source_snapshot_unlock();
         }
-        /* A HID device can be silent on its interrupt pipe until it is asked for
-         * a report: a Switch Pro Controller over USB sends nothing at all until
-         * polled. GET_REPORT is standard HID and works on any device, so ask for
-         * the first described input report before waiting on the pipe forever.
-         * Only feeds that have never delivered a sample are polled, so a pad
-         * that already streams correctly is never disturbed. */
+        /* A HID device can be silent until asked for an input report. Base
+         * fallback on received interrupt traffic, even when RAW/probe mode
+         * deliberately withholds decoded publication. State belongs to this
+         * connection, and failed/undecodable replies are rate limited. */
         if (devices[i].kind == GC_USB_INTERFACE_HID) {
-            static unsigned polls[USB_SLOTS];
-            static int polled_ok[USB_SLOTS];
-            const unsigned index = (unsigned)(feed - usb_feed);
-            int streaming_now;
-            source_snapshot_lock();
-            streaming_now = feed->slot >= 0 && last_valid[feed->slot];
-            source_snapshot_unlock();
-            if (index < USB_SLOTS && !polled_ok[index] && !streaming_now &&
-                ++polls[index] >= 6) {
+            if (gc_usb_fallback_due(&feed->fallback, (uint64_t)now_ms())) {
                 uint8_t reply[USB_REPORT];
                 struct usb_ctl_request poll;
                 const unsigned report_id =
@@ -1275,8 +1273,8 @@ static void usb_tick(void)
                 memset(reply, 0, sizeof reply);
                 poll.ucr_data = reply;
                 poll.ucr_flags = USB_SHORT_XFER_OK;
-                poll.ucr_request.bmRequestType = 0x81;      /* device to host, class */
-                poll.ucr_request.bRequest = 6;              /* GET_REPORT */
+                poll.ucr_request.bmRequestType = 0xA1;      /* device to host, class, interface */
+                poll.ucr_request.bRequest = 0x01;           /* HID GET_REPORT */
                 USETW(poll.ucr_request.wValue, (uint16_t)(0x0100u | report_id));
                 USETW(poll.ucr_request.wIndex, (uint16_t)devices[i].interface_number);
                 USETW(poll.ucr_request.wLength, (uint16_t)sizeof reply);
@@ -1286,16 +1284,23 @@ static void usb_tick(void)
                 if (noted++ < 4)
                     log_line("usb: %s GET_REPORT id=%#x rc=%d actlen=%d errno=%d",
                              devices[i].path, report_id, rc, poll.ucr_actlen, poll_errno);
-                if (rc == 0 &&
+                const int received = rc == 0 && poll.ucr_actlen > 0 &&
+                    (size_t)poll.ucr_actlen <= sizeof reply;
+                if (received) ++feed->fallback.get_report_successes;
+                else ++feed->fallback.get_report_failures;
+                int reply_nonzero = 0;
+                for (int k = 0; received && k < poll.ucr_actlen; ++k)
+                    reply_nonzero |= reply[k];
+                if (received && reply_nonzero &&
                     poll.ucr_actlen > 0 && (size_t)poll.ucr_actlen <= sizeof reply) {
-                    memcpy(feed->report, reply, (size_t)poll.ucr_actlen);
-                    feed->lenp = (uint32_t)poll.ucr_actlen;
-                    polls[index] = 0;
+                    /* The interrupt transfer can still own report/lenp.
+                     * Decode control data separately; never overwrite them. */
                     source_snapshot_lock();
-                    raw_sample(feed->slot, feed->report, feed->lenp);
+                    raw_sample(feed->slot, reply, (size_t)poll.ucr_actlen);
                     source_snapshot_unlock();
-                    if (usb_decode(feed, &devices[i], &state)) {
-                        polled_ok[index] = 1;
+                    if (usb_decode_report(feed, &devices[i], &state,
+                                          reply, (uint32_t)poll.ucr_actlen)) {
+                        feed->fallback.control_decoded = 1;
                         remember(feed->slot, &state, devices[i].vid, devices[i].pid);
                         continue;
                     }
@@ -1370,6 +1375,7 @@ static void usb_tick(void)
             usb_note_io(feed, 0, 0, 1);
             continue;
         }
+        gc_usb_fallback_interrupt(&feed->fallback, (uint64_t)now_ms());
         source_snapshot_lock();
         if (policy_revoked[feed->slot] || atomic_load_explicit(&source_fault,memory_order_acquire)) {
             source_snapshot_unlock(); continue;

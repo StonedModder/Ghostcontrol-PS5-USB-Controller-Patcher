@@ -99,3 +99,37 @@ and hotplug, including an already-held button, then release and unplug/replug.
 Check a generic HID controller's custom setup still works. Do not force a VID/PID
 rename, XInput parser or guessed mapping. This fixes premature publication but
 does not establish resolution of all inactive controls, reconnect faults or EBUSY.
+
+## GH5 fallback corrections from sdlemos's new captures
+
+Console testing, diagnostic captures and the follow-up findings were provided by
+[sdlemos](https://github.com/sdlemos), reporting PS5 firmware 11.60 and the original
+PS3 GH5 receiver `12ba:0100`. The supplied archive has four logs, not source or an
+ELF. Per-generation final counters sum to 3,313 and 2,494 successful completions.
+Each session contains 256 RAW samples spanning about six seconds, including
+105/109 short control replies. VDA probing is explicitly disabled. These captures
+establish continued USB delivery, not a cause for EBUSY or working gameplay.
+
+The fallback now uses recent valid interrupt-IN reception independently of
+decoded/publication state. A one-second quiet window permits fallback again;
+initial fallback retains its six-tick grace and retries are at least 250 ms
+apart. Per-connection state tracks interrupt reception, control attempts,
+transport successes/failures and timestamps. Feed open/close resets that state,
+so successful polling on one connection cannot suppress another in the same slot.
+PR 32's class/interface GET_REPORT request and all-zero reply safeguard are kept.
+Control replies decode separately instead of overwriting an outstanding interrupt
+transfer's buffer or requested length. Interrupt START/poll/COMPLETE is unchanged.
+
+`python3 -B tools/tests/test_usb_fallback.py` executes the production fallback
+block with mocked clock/control I/O. It reproduces redundant polling during
+RAW-only reception before the fix, and checks quiet-pipe fallback, bounded
+failed retries, success/failure counters, replacement connection state, expiry
+of recent traffic and preservation of an in-flight interrupt buffer.
+
+The Experimental-only decode counters, bounded RAW sampler and marker-controlled
+VDA mode are not in the public tree or supplied archive. Their corrections and
+preservation of the local db_forget rollback require the corresponding source.
+Do not label probe-disabled skips as decode failures, neutral probes as decoded
+controls, or requested ELF/source ZIP variants as reproduced without that tree.
+Record exact combined source and ELF hashes, then test RAW/probe-OFF and VDA/probe-ON
+in separate sessions. Hardware behavior of these new fallback changes is NOT VERIFIED.
