@@ -249,3 +249,37 @@ restarting on EBUSY. It does not establish identical PS5 behavior:
 https://github.com/freebsd/freebsd-src/blob/releng/11.0/sys/dev/usb/usb_generic.c
 The captures' poll_revents=0x41 includes read readiness, so simply removing write
 readiness is not demonstrated to fix their EBUSY pattern. No such change is made.
+
+
+## Virtual-pad creation preflight and accepted-input evidence
+
+The GH5 path still depends on AddDevice → kernel-log identification → MBus bind
+→ InsertData. Source review reproduced AddDevice being called even when its
+new kernel-log source had already reached EOF or a read error. A bounded drain
+could also leave old queued data behind for the new identification window.
+Creation now requires a drain to EAGAIN and a complete line boundary; a dead,
+undrained or partial stream is closed with a diagnostic before AddDevice.
+EINTR is retried within the existing bounded read budget. This prevents a known
+unusable identification source from creating an unidentifiable pad; it does
+not prove that a quiet/live server will deliver the future DEVICE_ADDED event.
+Busy or partial streams may withhold creation and require retry/reconnect.
+
+The production startup/reader regression failed before the fix because an EOF
+source still called AddDevice. It now covers EOF, hard read failure, backlog
+budget exhaustion, partial lines and a healthy empty stream that creates once.
+Unknown/ambiguous-device handling and identifier ownership remain unchanged.
+
+The first successful InsertData call now logs one per-device confirmation with
+slot/device/handle/user. Rejection/recovery logging remains; repeated successes
+do not flood the log. An API-accepted report is still not proof that a game
+consumed it. `test_vpad_injection.py` executes the production payload constructor
+and API-call path with a fake console API. It checks the host 120-byte layout,
+press/release and axes, pending/invalid-slot gating, refusal recovery and
+per-device confirmation reset. This does not verify the PS5 ABI on hardware.
+
+Keep credit to sdlemos for the console captures. Newest VDA-disabled captures
+cannot exercise this fix; no executed ELF/source identity is available. No
+private marker behavior, firmware patch, instrument identity or tilt calibration
+is invented. Retest a known build with VDA enabled, exact ELF hash, recorded
+physical controls and the complete binding/insertion logs. No full local app
+build or PS5 execution was performed. Rollback: revert this follow-up commit.

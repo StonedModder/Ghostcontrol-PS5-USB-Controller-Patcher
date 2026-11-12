@@ -107,6 +107,7 @@ typedef struct {
     int32_t handle;
     uint64_t dev;
     uint32_t reject_count;      /* consecutive InsertData refusals (prompt rejects are transient) */
+    int insert_confirmed;       /* first accepted input, reset with this device */
 } vslot;
 
 static mbus_bind_fn g_bind;
@@ -254,8 +255,9 @@ static uint64_t virtual_device_in(const char *line)
     return device_id;
 }
 
-/* Reads what the log has, a bounded amount per call. */
-static void log_source_read(void)
+/* Reads a bounded amount. 1 means drained to EAGAIN; 0 means EOF, error
+ * or an exhausted budget. Only a drained source can open a new window. */
+static int log_source_read(void)
 {
     char buf[1024];
     int rounds;
@@ -263,10 +265,11 @@ static void log_source_read(void)
     for (rounds = 0; rounds < 8 && g_log_fd >= 0; rounds++) {
         ssize_t n = read(g_log_fd, buf, sizeof buf), i;
         if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 1;
             if (n == 0) g_log_eof = 1;
-            else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-                g_log_read_errno = errno;
-            return;
+            else g_log_read_errno = errno;
+            return 0;
         }
         g_log_bytes += (unsigned long)n;
         for (i = 0; i < n; i++) {
@@ -289,6 +292,7 @@ static void log_source_read(void)
             if (g_matches == 0 || dev != g_match_dev) g_matches++;
         }
     }
+    return 0;
 }
 
 /* Report the transport separately from matching: zero bytes cannot test a parser. */
@@ -526,7 +530,16 @@ static void start_identification(int slot)
         g_slot[slot].st = VP_FAILED;
         return;
     }
-    log_source_read();                  /* what came before is not ours */
+    g_log_eof = g_log_read_errno = 0;
+    /* Old queued events cannot identify the device we have not created yet.
+     * Refuse creation if this bounded drain cannot establish a clean window. */
+    if (!log_source_read() || g_line_len) {
+        log_line("slot %d: kernel log not ready for identification (eof=%d read_errno=%d partial=%zu); AddDevice not called",
+                 slot, g_log_eof, g_log_read_errno, g_line_len);
+        log_source_close();
+        g_slot[slot].st = VP_FAILED;
+        return;
+    }
     g_matches = 0;
     g_match_dev = 0;
     g_log_bytes = g_log_lines = g_log_events = 0;
@@ -662,10 +675,18 @@ void vpad_update(int slot, const pad_state *st)
             if (n == 1u || (n % 600u) == 0u)
                 log_line("slot %d: InsertData refused %#x (count %u), still feeding",
                          slot, (unsigned)ir, n);
-        } else if (g_slot[slot].reject_count) {
-            log_line("slot %d: InsertData recovered after %u refusals", slot,
-                     g_slot[slot].reject_count);
-            g_slot[slot].reject_count = 0;
+        } else {
+            if (!g_slot[slot].insert_confirmed) {
+                log_line("slot %d: first InsertData accepted device=%#llx handle=%#x user=%#x",
+                         slot, (unsigned long long)g_slot[slot].dev,
+                         (unsigned)g_slot[slot].handle, (unsigned)g_user);
+                g_slot[slot].insert_confirmed = 1;
+            }
+            if (g_slot[slot].reject_count) {
+                log_line("slot %d: InsertData recovered after %u refusals", slot,
+                         g_slot[slot].reject_count);
+                g_slot[slot].reject_count = 0;
+            }
         }
     }
 }

@@ -11,7 +11,8 @@ source = (root / 'core/src/bt/ps5_vpad.c').read_text()
 # These adjacent pure helpers have no PS5 dependencies. Extract their actual definitions
 # so the test cannot silently exercise a separate implementation of discovery.
 parser = source.split('static uint64_t hex_after(', 1)[1]
-parser = 'static uint64_t hex_after(' + parser.split('/* Reads what the log has,', 1)[0]
+assert 'static int log_source_read(' in parser
+parser = 'static uint64_t hex_after(' + parser.split('static int log_source_read(', 1)[0]
 harness = r'''
 #include <assert.h>
 #include <ctype.h>

@@ -10,6 +10,7 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'core/src/bt/ps5_vpad.c').read_text()
 globals_ = source[source.index('static int g_log_fd'):source.index('/* Raw sensor counts')]
 reader = source[source.index('static int log_source_open('):source.index('/* ---- users and privileges')]
+start = source[source.index('static void start_identification('):source.index('static void finish_identification(')]
 harness = r'''
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -28,7 +29,13 @@ harness = r'''
 #define LINE_MAX_LEN 1024
 static int g_pending = 0, g_matches;
 static uint64_t g_match_dev;
-static long g_t_match;
+static long g_t_match, g_t_add;
+static int g_user=1, add_calls;
+enum {VP_FAILED, VP_PENDING};
+static struct {int st;} g_slot[1];
+#define VIRTUAL_DEVICE_DUALSENSE 3
+static int main_user(void) {return 1;}
+static int scePadVirtualDeviceAddDevice(void *p, int kind) {(void)p; (void)kind; ++add_calls; return 0;}
 static int fail_get, fail_set, fail_close, reads, closes, flags;
 static const char *input;
 static int outcome = EAGAIN;
@@ -78,6 +85,7 @@ static ssize_t fake_read(int fd, void *buffer, size_t length) {
 #define read fake_read
 GLOBALS
 READER
+START
 int main(void) {
     fail_get = 1;
     assert(log_source_open() == -1); /* Must not return a blocking TCP socket. */
@@ -118,12 +126,34 @@ int main(void) {
     /* Every outcome retains the descriptor; no fallback or guessing an owner. */
     assert(g_log_fd == 10 && closes == 2);
     log_source_close(); assert(g_log_fd == -1 && closes == 3);
+    /* A dead log source cannot identify a newly created virtual device. */
+    g_pending=-1; outcome=0; input="";
+    start_identification(0);
+    assert(!add_calls && g_pending==-1 && g_slot[0].st==VP_FAILED && g_log_fd==-1);
+    outcome=EIO; start_identification(0);
+    assert(!add_calls && g_pending==-1 && g_slot[0].st==VP_FAILED);
+    outcome=EAGAIN;
+    /* The budget is bounded: do not associate an old backlog with new VDA. */
+    char backlog[9001];
+    for (int i=0; i<9000; ++i) backlog[i] = i%2 ? '\n' : 'x';
+    backlog[9000]=0; input=backlog;
+    start_identification(0);
+    assert(!add_calls && g_pending==-1 && g_slot[0].st==VP_FAILED && g_log_fd==-1);
+    input="DEVICE_ADDED deviceId=";
+    start_identification(0);
+    assert(!add_calls && g_pending==-1 && g_slot[0].st==VP_FAILED && g_log_fd==-1);
+    /* Healthy empty stream: create once and start the actual match window. */
+    input=""; start_identification(0);
+    assert(add_calls==1 && g_pending==0 && g_slot[0].st==VP_PENDING);
+    assert(g_log_fd==10 && !g_log_bytes && !g_log_events);
+    log_source_close();
+    const int before_ambiguous=closes;
     fail_get = fail_close = 1;
     assert(log_source_open() == -1 && g_log_close_uncertain);
-    assert(log_source_open() == -1 && closes == 4); /* Never retry ambiguous close. */
+    assert(log_source_open() == -1 && closes == before_ambiguous+1); /* Never retry ambiguous close. */
     return 0;
 }
-'''.replace('GLOBALS', globals_).replace('READER', reader)
+'''.replace('GLOBALS', globals_).replace('READER', reader).replace('START', start)
 with tempfile.TemporaryDirectory(prefix='ghostcontrol-vpad-log-') as directory:
     work = Path(directory)
     (work / 'test.c').write_text(harness)
@@ -131,4 +161,4 @@ with tempfile.TemporaryDirectory(prefix='ghostcontrol-vpad-log-') as directory:
         '-std=c11', '-Wall', '-Wextra', '-Werror', str(work / 'test.c'),
         '-o', str(work / 'test')], check=True)
     subprocess.run([str(work / 'test')], check=True)
-print('PASS: kernel-log nonblocking setup, bounded reads, EOF/error diagnostics and close ownership')
+print('PASS: kernel-log reader/ownership; VDA creation withheld on dead, undrained or partial log streams')
