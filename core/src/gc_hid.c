@@ -10,6 +10,22 @@ static const GcButton hid_buttons[] = {GC_BUTTON_CROSS, GC_BUTTON_CIRCLE, GC_BUT
 
 #define HID_CANONICAL_BUTTONS (sizeof(hid_buttons) / sizeof(hid_buttons[0]))
 
+void gc_hid_set_device(GcHidLayout *layout, uint16_t vid, uint16_t pid)
+{
+    if (layout) layout->ps3_gh_guitar = vid == 0x12ba && pid == 0x0100;
+}
+
+/* PS3 Guitar Hero uses Square/Cross/Circle for Button 1/2/3, unlike the
+ * generic Cross/Circle/Square order. Keep descriptor usages intact so setup
+ * profiles still refer to the physical buttons. See docs/pr29-validation.md. */
+static uint32_t hid_button_mask(const GcHidLayout *layout, unsigned usage)
+{
+    static const GcButton guitar[] = {GC_BUTTON_SQUARE, GC_BUTTON_CROSS, GC_BUTTON_CIRCLE};
+    if (!usage || usage > HID_CANONICAL_BUTTONS) return 0;
+    return gc_button_mask(layout && layout->ps3_gh_guitar && usage <= 3
+                          ? guitar[usage - 1] : hid_buttons[usage - 1]);
+}
+
 static uint32_t hid_hat_mask(int32_t minimum, int32_t maximum, int32_t value)
 {
     static const uint32_t hats8[] = {
@@ -243,7 +259,7 @@ static int gcid_generic_input(const GcHidLayout *layout, unsigned report,
         found = 1;
         if (f->bits == 1) {
             if (buttons < HID_CANONICAL_BUTTONS) {
-                const uint32_t mask = gc_button_mask(hid_buttons[buttons]);
+                const uint32_t mask = hid_button_mask(layout, buttons + 1);
                 pad->buttons = (pad->buttons & ~mask) |
                                (value && !(f->null_state && value < f->minimum) ? mask : 0);
             }
@@ -305,7 +321,7 @@ int gc_hid_input(const GcHidLayout *layout, const uint8_t *data, size_t size, Sc
                 ? f->array_usage_max : (uint16_t)HID_CANONICAL_BUTTONS;
             for (uint16_t usage = f->array_usage_min;
                  usage <= last; ++usage)
-                array_mask |= gc_button_mask(hid_buttons[usage - 1]);
+                array_mask |= hid_button_mask(layout, usage);
         } else if (f->page == 1 && f->usage == 0x39) {
             has_hat = 1;
         } else if (f->page == 1 && f->usage >= 0x90 &&
@@ -336,10 +352,10 @@ int gc_hid_input(const GcHidLayout *layout, const uint8_t *data, size_t size, Sc
             uint16_t usage = 0;
             if (hid_array_usage(f, (int32_t)value, is_null, &usage) &&
                 usage <= HID_CANONICAL_BUTTONS)
-                pad->buttons |= gc_button_mask(hid_buttons[usage - 1]);
+                pad->buttons |= hid_button_mask(layout, usage);
         } else if (f->page == 9) {
             if (f->usage <= HID_CANONICAL_BUTTONS) {
-                const uint32_t mask = gc_button_mask(hid_buttons[f->usage - 1]);
+                const uint32_t mask = hid_button_mask(layout, f->usage);
                 pad->buttons = (pad->buttons & ~mask) |
                                (!is_null && value ? mask : 0);
             }
@@ -723,7 +739,7 @@ void gc_hid_apply_profile_values(const GcHidLayout *layout,
         replaced |= gc_button_mask((GcButton)target);
         if (binding->source.page == 9 && binding->source.usage >= 1 &&
             binding->source.usage <= HID_CANONICAL_BUTTONS) {
-            replaced |= gc_button_mask(hid_buttons[binding->source.usage - 1]);
+            replaced |= hid_button_mask(layout, binding->source.usage);
         } else if (binding->source.page == 1 &&
                    binding->source.usage == 0x39) {
             replaced |= hid_hat_mask(binding->source.minimum,

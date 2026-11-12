@@ -107,6 +107,7 @@ typedef struct {
     int32_t handle;
     uint64_t dev;
     uint32_t reject_count;      /* consecutive InsertData refusals (prompt rejects are transient) */
+    int insert_confirmed;       /* first accepted input, reset with this device */
 } vslot;
 
 static mbus_bind_fn g_bind;
@@ -122,6 +123,9 @@ static int g_matches;
 static uint64_t g_match_dev;
 static int g_log_fd = -1, g_log_is_dev;
 static int g_log_close_uncertain;
+static unsigned long g_log_bytes, g_log_lines, g_log_events;
+static int g_log_eof, g_log_read_errno;
+static int32_t g_add_result;
 static char g_line[LINE_MAX_LEN];
 static size_t g_line_len;
 
@@ -167,7 +171,12 @@ static int log_source_open(void)
         sin.sin_port = htons(3232);
         sin.sin_addr.s_addr = inet_addr("127.0.0.1");
         if (connect(fd, (struct sockaddr *)&sin, sizeof sin) == 0) {
-            fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+            const int flags = fcntl(fd, F_GETFL);
+            if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+                log_line("vpad: TCP kernel log nonblocking setup failed: errno %d", errno);
+                if (close(fd) != 0) g_log_close_uncertain = 1;
+                return -1;
+            }
             g_log_is_dev = 0;
             return fd;
         }
@@ -209,30 +218,60 @@ static uint64_t hex_after(const char *s, const char *key)
     return v;
 }
 
-/* A virtual DualSense appearing:
- *   SCE_MBUS_EVENT_DEVICE_ADDED [DeviceId:0x...][type:1][subType:22]
- *   [capabilityBattery:0]...
- * A real pad reports a battery, so a line saying otherwise is not ours. */
+/* Newer firmware prints deviceType in decimal (deviceType=22). Parse with
+ * decimal by default, or hex for an explicit 0x prefix; hex_after() reads 22
+ * as 0x22 (34), so the new format was never recognized. */
+static int device_type_is(const char *line, unsigned want)
+{
+    const char *p = strstr(line, "deviceType=");
+    char *end;
+
+    if (!p) return 0;
+    p += strlen("deviceType=");
+    const int base = p[0] == '0' && (p[1] == 'x' || p[1] == 'X') ? 16 : 10;
+    const unsigned long value = strtoul(p, &end, base);
+    return end != p && (*end == '\0' || isspace((unsigned char)*end)) && value == want;
+}
+
+/* A virtual DualSense appearing. Firmware versions format the MBus event
+ * differently. Older versions use DeviceId/type/subType/capabilityBattery;
+ * newer versions use deviceId/deviceType/userId, for example:
+ *   event=DEVICE_ADDED deviceId=0x1f030d deviceType=22 userId=0x0(0)
+ * The real pad reports a battery in the older format, so exclude it there. */
 static uint64_t virtual_device_in(const char *line)
 {
     const char *bat;
+    uint64_t device_id;
+    int old_format, new_format;
 
-    if (!strstr(line, "DEVICE_ADDED") || !strstr(line, "type:1") || !strstr(line, "subType:22"))
+    if (!strstr(line, "DEVICE_ADDED"))
         return 0;
+    old_format = strstr(line, "type:1") && strstr(line, "subType:22");
+    new_format = device_type_is(line, 22);
+    if (!old_format && !new_format) return 0;
     bat = strstr(line, "capabilityBattery:");
     if (bat && bat[18] != '0') return 0;
-    return hex_after(line, "DeviceId");
+    device_id = hex_after(line, old_format ? "DeviceId" : "deviceId=");
+    return device_id;
 }
 
-/* Reads what the log has, a bounded amount per call. */
-static void log_source_read(void)
+/* Reads a bounded amount. 1 means drained to EAGAIN; 0 means EOF, error
+ * or an exhausted budget. Only a drained source can open a new window. */
+static int log_source_read(void)
 {
     char buf[1024];
     int rounds;
 
     for (rounds = 0; rounds < 8 && g_log_fd >= 0; rounds++) {
         ssize_t n = read(g_log_fd, buf, sizeof buf), i;
-        if (n <= 0) return;
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 1;
+            if (n == 0) g_log_eof = 1;
+            else g_log_read_errno = errno;
+            return 0;
+        }
+        g_log_bytes += (unsigned long)n;
         for (i = 0; i < n; i++) {
             uint64_t dev;
             if (buf[i] != '\n' && g_line_len < sizeof g_line - 1) {
@@ -241,6 +280,8 @@ static void log_source_read(void)
             }
             g_line[g_line_len] = '\0';
             g_line_len = 0;
+            ++g_log_lines;
+            if (strstr(g_line, "DEVICE_ADDED")) ++g_log_events;
             if (g_log_is_dev) log_line("klog: %s", g_line);  /* kept, not lost */
             dev = virtual_device_in(g_line);
             if (!dev || g_pending < 0) continue;
@@ -251,6 +292,26 @@ static void log_source_read(void)
             if (g_matches == 0 || dev != g_match_dev) g_matches++;
         }
     }
+    return 0;
+}
+
+/* Report the transport separately from matching: zero bytes cannot test a parser. */
+static void log_identification_result(int slot)
+{
+    log_line("vpad: slot %d identification source=%s add_rc=%#x bytes=%lu lines=%lu device_added=%lu candidates=%d eof=%d read_errno=%d",
+             slot, g_log_is_dev ? "/dev/klog" : "TCP:3232", (unsigned)g_add_result,
+             g_log_bytes, g_log_lines, g_log_events, g_matches, g_log_eof, g_log_read_errno);
+    if (g_matches != 0) return;
+    if (g_log_read_errno)
+        log_line("vpad: kernel log read failed; check the log source before device matching");
+    else if (g_log_eof && !g_log_is_dev)
+        log_line("vpad: TCP kernel log stream ended; check the log server");
+    else if (!g_log_bytes)
+        log_line("vpad: kernel log supplied no bytes; device matching was not exercised");
+    else if (!g_log_events)
+        log_line("vpad: no DEVICE_ADDED event received during identification");
+    else
+        log_line("vpad: DEVICE_ADDED events received but no virtual DualSense matched");
 }
 
 /* ---- users and privileges ---------------------------------------------------- */
@@ -469,9 +530,20 @@ static void start_identification(int slot)
         g_slot[slot].st = VP_FAILED;
         return;
     }
-    log_source_read();                  /* what came before is not ours */
+    g_log_eof = g_log_read_errno = 0;
+    /* Old queued events cannot identify the device we have not created yet.
+     * Refuse creation if this bounded drain cannot establish a clean window. */
+    if (!log_source_read() || g_line_len) {
+        log_line("slot %d: kernel log not ready for identification (eof=%d read_errno=%d partial=%zu); AddDevice not called",
+                 slot, g_log_eof, g_log_read_errno, g_line_len);
+        log_source_close();
+        g_slot[slot].st = VP_FAILED;
+        return;
+    }
     g_matches = 0;
     g_match_dev = 0;
+    g_log_bytes = g_log_lines = g_log_events = 0;
+    g_log_eof = g_log_read_errno = 0;
 
     /* The parameter block as the PS5 accepts it: size 32, user 1,
      * the rest marked so that a call writing into it shows in the log. */
@@ -479,6 +551,7 @@ static void start_identification(int slot)
     param[0] = (int32_t)sizeof param;
     param[1] = 1;
     r = scePadVirtualDeviceAddDevice(param, VIRTUAL_DEVICE_DUALSENSE);
+    g_add_result = r;
     log_line("slot %d: AddDevice %#x, block %08x %08x %08x %08x %08x %08x", slot, (unsigned)r,
              (unsigned)param[2], (unsigned)param[3], (unsigned)param[4], (unsigned)param[5],
              (unsigned)param[6], (unsigned)param[7]);
@@ -496,6 +569,7 @@ static void finish_identification(long now)
     if (g_matches == 0 && now - g_t_add < T_IDENTIFY) return;
     if (g_matches == 1 && now - g_t_match < T_AMBIGUITY && now - g_t_add < T_IDENTIFY) return;
 
+    log_identification_result(slot);
     g_pending = -1;
     log_source_close();
     if (g_matches != 1) {
@@ -601,10 +675,18 @@ void vpad_update(int slot, const pad_state *st)
             if (n == 1u || (n % 600u) == 0u)
                 log_line("slot %d: InsertData refused %#x (count %u), still feeding",
                          slot, (unsigned)ir, n);
-        } else if (g_slot[slot].reject_count) {
-            log_line("slot %d: InsertData recovered after %u refusals", slot,
-                     g_slot[slot].reject_count);
-            g_slot[slot].reject_count = 0;
+        } else {
+            if (!g_slot[slot].insert_confirmed) {
+                log_line("slot %d: first InsertData accepted device=%#llx handle=%#x user=%#x",
+                         slot, (unsigned long long)g_slot[slot].dev,
+                         (unsigned)g_slot[slot].handle, (unsigned)g_user);
+                g_slot[slot].insert_confirmed = 1;
+            }
+            if (g_slot[slot].reject_count) {
+                log_line("slot %d: InsertData recovered after %u refusals", slot,
+                         g_slot[slot].reject_count);
+                g_slot[slot].reject_count = 0;
+            }
         }
     }
 }

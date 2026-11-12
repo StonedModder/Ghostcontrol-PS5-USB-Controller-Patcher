@@ -44,6 +44,7 @@ typedef struct {
     intptr_t fp_close;
     intptr_t fp_get_handle, fp_open, fp_is_ds4;
     intptr_t fp_clock_gettime;
+    intptr_t fp_controller_info;
     volatile uint64_t owner_deadline_ns;
     uint64_t thread_id;
     int32_t owner_pid;
@@ -80,6 +81,8 @@ gc_ds4_reader_stub(void *argument)
     GcRemoteHandle get_handle = (GcRemoteHandle)(uintptr_t)args->fp_get_handle;
     GcRemoteClose is_ds4 = (GcRemoteClose)(uintptr_t)args->fp_is_ds4;
     int (*get_time)(clockid_t, struct timespec *) = (void *)(uintptr_t)args->fp_clock_gettime;
+    int32_t (*controller_info)(int32_t, void *) =
+        (void *)(uintptr_t)args->fp_controller_info;
     uint32_t owner_countdown = args->owner_check_interval;
     uint32_t scan_cursor = 0;
 
@@ -99,7 +102,12 @@ gc_ds4_reader_stub(void *argument)
             if (!already) {
                 int32_t handle = get_handle(user, 0, pad_index);
                 ScePadData probe;
-                if (handle > 0 && is_ds4(handle) > 0 &&
+                uint8_t info[32];
+                /* A failed or short controller-info response must not classify
+                 * a local pad as a RemotePlay source during hotplug. */
+                for (unsigned i = 0; i < sizeof(info); ++i) info[i] = 0xff;
+                if (handle > 0 && controller_info &&
+                    !controller_info(handle, info) && info[10] == 2 && is_ds4(handle) > 0 &&
                     !read_state(handle, &probe) && probe.connected) {
                     int duplicate = 0;
                     for (unsigned slot = 0; slot < args->source_count; ++slot)
@@ -182,6 +190,7 @@ typedef struct {
     intptr_t read_ext;
     intptr_t data_internal;
     intptr_t controller_info;
+    intptr_t set_vibration;
     intptr_t usleep;
     intptr_t kill;
     intptr_t clock_gettime;
@@ -213,13 +222,14 @@ static void
 collect_evidence(pid_t pid, const GcDs4SourceSymbols *symbols,
                  GcDs4LibpadEvidence *evidence)
 {
-    const intptr_t functions[GC_DS4_LIBPAD_SYMBOLS] = {
+    const intptr_t functions[GC_DS4_SOURCE_LIBPAD_SYMBOLS] = {
         symbols->read_state, symbols->read_state_ext, symbols->read,
-        symbols->read_ext, symbols->data_internal, symbols->controller_info
+        symbols->read_ext, symbols->data_internal, symbols->controller_info,
+        symbols->set_vibration
     };
     memset(evidence, 0, sizeof(*evidence));
     evidence->firmware = kernel_get_fw_version();
-    for (size_t slot = 0; slot < GC_DS4_LIBPAD_SYMBOLS; ++slot) {
+    for (size_t slot = 0; slot < GC_DS4_SOURCE_LIBPAD_SYMBOLS; ++slot) {
         uint8_t code[256];
         if (functions[slot] > 0 &&
             gc_remote_read(pid, functions[slot], code, sizeof(code)) == 0) {
@@ -256,6 +266,7 @@ resolve_symbols(pid_t pid, GcDs4SourceSymbols *symbols)
     RESOLVE_PAD(read_ext, "scePadReadExt");
     RESOLVE_PAD(data_internal, "scePadGetDataInternal");
     RESOLVE_PAD(controller_info, "scePadGetControllerInformation");
+    RESOLVE_PAD(set_vibration, "scePadSetVibration");
 #undef RESOLVE_PAD
 
     symbols->usleep = gc_remote_resolve(pid, kernel, "usleep");
@@ -321,6 +332,27 @@ probe_device_identity(GcRemoteSession *session,
     return 0;
 }
 
+/* Only RemotePlay-session pads belong to this bridge. Local USB pads are
+ * owned by the USB service, even when RemotePlay exposes their DS4 identity. */
+static int
+probe_connection_type(GcRemoteSession *session,
+                      const GcDs4SourceSymbols *symbols,
+                      intptr_t scratch, int32_t handle, uint8_t *type)
+{
+    uint8_t info[32];
+    int64_t result = -1;
+    memset(info, 0xff, sizeof(info));
+    if (!symbols->controller_info || !type ||
+        gc_remote_write(session->pid, scratch, info, sizeof(info)) != 0 ||
+        remote_call(session, symbols->controller_info,
+                    (uint32_t)handle, (uint64_t)scratch, 0, 0,
+                    &result) != 0 || result != 0 ||
+        gc_remote_read(session->pid, scratch, info, sizeof(info)) != 0)
+        return -1;
+    *type = info[10];
+    return 0;
+}
+
 static int
 discover_sources(GcRemoteSession *session,
                  const GcDs4SourceSymbols *symbols,
@@ -363,7 +395,14 @@ discover_sources(GcRemoteSession *session,
             int public_identity = probe_device_identity(
                 session, symbols, scratch, handle, &vendor, &product) == 0 &&
                 gc_ds4_is_known(1, vendor, product);
-            int verified = read_ok && (public_identity || is_ds4 > 0);
+            uint8_t connection_type = 0xff;
+            int remote_pad = probe_connection_type(
+                session, symbols, scratch, handle, &connection_type) == 0 &&
+                connection_type == 2;
+            int verified = read_ok && (public_identity || is_ds4 > 0) && remote_pad;
+            if (read_ok && (public_identity || is_ds4 > 0) && !remote_pad)
+                source_log("skipped handle=0x%08x connection_type=%u (requires 2)\n",
+                    (uint32_t)handle, connection_type);
 
             int duplicate = 0;
             for (uint32_t slot = 0; slot < args->source_count; ++slot) {
@@ -486,6 +525,7 @@ start_in_process(pid_t pid, const int32_t *user_ids, size_t user_count,
     args.fp_open = 0;
     args.fp_is_ds4 = symbols.is_ds4;
     args.fp_clock_gettime = symbols.clock_gettime;
+    args.fp_controller_info = symbols.controller_info;
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now)) goto done;
     args.owner_deadline_ns = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
@@ -607,6 +647,45 @@ gc_ds4_source_snapshot(const GcDs4SourceReader *reader,
                bank->source_count * sizeof(snapshot->frames[0]));
         return 0;
     }
+    return -1;
+}
+
+int
+gc_ds4_source_set_vibration(const GcDs4SourceReader *reader,
+                            unsigned source_slot, uint8_t large, uint8_t small)
+{
+    typedef struct { uint8_t large_motor, small_motor; } GcDs4Vibration;
+    GcDs4SourceSymbols symbols;
+    GcRemoteSession session = {0};
+    uint32_t libpad = 0;
+    intptr_t set_vibration_mode;
+    int64_t mode_result = -1, vibration_result = -1;
+    if (!reader || source_slot >= reader->source_count || reader->pid <= 0 ||
+        kernel_get_proc(reader->pid) != reader->process_identity ||
+        resolve_symbols(reader->pid, &symbols) || !symbols.set_vibration ||
+        gc_remote_get_library(reader->pid, "libScePad", &libpad) ||
+        gc_remote_session_open(&session, reader->pid)) return -1;
+    set_vibration_mode = gc_remote_resolve(reader->pid, libpad,
+                                            "scePadSetVibrationMode");
+    if (!set_vibration_mode) goto failed;
+    GcDs4Source source = reader->sources[source_slot];
+    if (!source.identity_verified || !source.connected || source.pad_handle <= 0)
+        goto failed;
+    GcDs4Vibration vibration = {large, small};
+    const intptr_t scratch = reader->args_address + 0x3000;
+    if (gc_remote_write(reader->pid, scratch, &vibration, sizeof(vibration)) ||
+        remote_call(&session, set_vibration_mode,
+            (uint32_t)source.pad_handle, 2, 0, 0,
+            &mode_result) ||
+        remote_call(&session, symbols.set_vibration, (uint32_t)source.pad_handle,
+            (uint64_t)scratch, 0, 0, &vibration_result)) goto failed;
+    if (gc_remote_session_close(&session)) return -1;
+    source_log("rumble handle=0x%08x large=%u small=%u mode_rc=%lld set_rc=%lld\n",
+        (uint32_t)source.pad_handle, large, small,
+        (long long)mode_result, (long long)vibration_result);
+    return vibration_result == 0 ? 0 : -1;
+failed:
+    (void)gc_remote_session_close(&session);
     return -1;
 }
 
