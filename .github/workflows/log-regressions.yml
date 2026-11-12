@@ -1,0 +1,15 @@
+name: User log regressions
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Bond storage and inquiry retry regression tests
+        run: python3 -B tools/tests/test_log_regressions.py
+      - name: Expired inquiry cancellation regression
+        run: python3 -B tools/tests/test_inquiry_cancel.py
+      - name: Bluetooth publication lifecycle regression
+        run: python3 -B tools/tests/test_bt_input_lifecycle.py
+      - name: Bluetooth host syntax
+        run: cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fsyntax-only core/src/bt/host.c core/src/bt/le.c

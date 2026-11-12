@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static const pad_output k_player_colours[HOST_MAX_PADS] = {
     { 0, 0, 0x00, 0x00, 0x40, 1 },      /* blue */
@@ -52,8 +53,11 @@ typedef struct {
     /* The inquiry command in flight, and the wait after a refused one. */
     long t_inquiry;
     long inquiry_at;
+    long inquiry_cancel_at;
     long inquiry_backoff;
 } host_storage;
+
+static void cancel_inquiry(host_t *h);
 
 static int *classic_acl(host_t *h, const link_t *l)
 {
@@ -230,7 +234,30 @@ db_rec *db_find(host_t *h, const unsigned char *addr)
 /* The store file: a magic string, then one fixed-size record per pad:
  *   addr 6, key 16, key type 1, vid 2, pid 2, le 1, addr type 1, ediv 2,
  *   rand 8, irk 16, has irk 1, padding */
-void db_save(host_t *h)
+/* Pairing can run before the UI has created the service's state directory. */
+static int db_make_parent(const char *path)
+{
+    char parent[300];
+    if (strlen(path) >= sizeof parent) { errno = ENAMETOOLONG; return 0; }
+    strcpy(parent, path);
+    char *last = strrchr(parent, '/');
+    if (!last) return 1;
+    if (last == parent) return 1;
+    *last = '\0';
+    for (char *at = parent + 1; ; ++at) {
+        if (*at && *at != '/') continue;
+        char saved = *at;
+        *at = '\0';
+        struct stat st;
+        if (mkdir(parent, 0755) != 0 && (errno != EEXIST || stat(parent, &st) != 0 || !S_ISDIR(st.st_mode)))
+            return 0;
+        *at = saved;
+        if (!saved) break;
+    }
+    return 1;
+}
+
+int db_save(host_t *h)
 {
     char tmp[300];
     FILE *f;
@@ -240,9 +267,10 @@ void db_save(host_t *h)
      * store, never half of one. */
     snprintf(tmp, sizeof tmp, "%s.new", h->db_path);
     f = fopen(tmp, "wb");
+    if (!f && errno == ENOENT && db_make_parent(h->db_path)) f = fopen(tmp, "wb");
     if (!f) {
         log_line("store: cannot write %s: errno %d", tmp, errno);
-        return;
+        return 0;
     }
     fwrite(DB_MAGIC, 1, 8, f);
     for (i = 0; i < h->ndb; i++) {
@@ -268,7 +296,9 @@ void db_save(host_t *h)
     if (!ok || rename(tmp, h->db_path) != 0) {
         log_line("store: could not save %s: errno %d", h->db_path, errno);
         remove(tmp);
+        return 0;
     }
+    return 1;
 }
 
 static void db_load(host_t *h)
@@ -316,14 +346,19 @@ db_rec *db_put(host_t *h, const unsigned char *addr)
     return d;
 }
 
-void db_forget(host_t *h, const unsigned char *addr)
+int db_forget(host_t *h, const unsigned char *addr)
 {
     db_rec *d = db_find(h, addr);
 
-    if (!d) return;
+    if (!d) return 0;
     memmove(d, d + 1, sizeof *d * (size_t)(h->ndb - (d - h->db) - 1));
     h->ndb--;
-    db_save(h);
+    if (!db_save(h)) {
+        log_line("store: forgot %s in memory but could not persist: errno %d",
+                 addr_str(addr), errno);
+        return 0;
+    }
+    return 1;
 }
 
 /* ---- GATT cache: per-pad discovery results, so reconnections skip the
@@ -973,19 +1008,21 @@ void link_input(host_t *h, link_t *l, const unsigned char *rep, int len)
 {
     int r;
 
-    if (h->dead || h->closing || !l->prof || len < 1) return;
+    if (h->dead || h->closing || !l->connected || l->disconnecting ||
+        !l->prof || len < 1) return;
     r = l->prof->parse(l->pctx.bytes, rep, len, &l->st);
     if (r == PARSE_FULL) l->full = 1;
     host_origin origin = captured_origin(h, l);
     if (((host_storage *)h)->qualified) {
         if (r != PARSE_NONE && l->ready)
             h->ev.on_state_qualified(h->ev.ud, slot_of(h, l), &origin, &l->st);
-        if (!h->dead && l->ready)
+        if (!h->dead && !h->closing && l->connected && !l->disconnecting && l->ready)
             h->ev.on_report_qualified(h->ev.ud, slot_of(h, l), &origin, rep, len);
     } else {
         if (r != PARSE_NONE && l->ready && h->ev.on_state)
             h->ev.on_state(h->ev.ud, slot_of(h, l), &l->st);
-        if (l->ready && h->ev.on_report)
+        if (!h->dead && !h->closing && l->connected && !l->disconnecting &&
+            l->ready && h->ev.on_report)
             h->ev.on_report(h->ev.ud, slot_of(h, l), rep, len);
     }
 }
@@ -1259,7 +1296,7 @@ static void pair_with(host_t *h, const unsigned char *rec)
     memcpy(((host_storage *)h)->last_call, rec, sizeof ((host_storage *)h)->last_call);
     if (!((host_storage *)h)->in_repage)
         ((host_storage *)h)->fresh_left = FRESH_LINK_TRIES;
-    if (h->inquiring) send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+    if (h->inquiring) cancel_inquiry(h);
 
     memcpy(p, rec, 6);
     put16(p + 6, 0xCC18);               /* DM1..DH5 */
@@ -1495,13 +1532,24 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
         h->cc_len = len < (int)sizeof h->cc ? len : (int)sizeof h->cc;
         memcpy(h->cc, ev, (size_t)h->cc_len);
         if (le16(ev + 3) == 0x200C && h->le_scan_pending > 0) --h->le_scan_pending;
-        if (le16(ev + 3) == OP_INQUIRY_CANCEL && ev[5] == 0) h->inquiring = 0;
+        if (le16(ev + 3) == OP_INQUIRY_CANCEL) {
+            host_storage *bs = (host_storage *)h;
+            /* Inquiry Cancel returns Command Complete (Core Vol 4, Part E
+             * 7.1.2). Disallowed can race the natural Inquiry Complete.
+             * A fresh inquiry resets this deadline: ignore an old reply. */
+            if ((bs->inquiry_cancel_at || h->closing) &&
+                ev[5] == 0) {
+                h->inquiring = 0;
+                bs->inquiry_cancel_at = 0;
+            }
+        }
         if (!h->closing) le_on_cmd_complete(h, le16(ev + 3), ev + 5, len - 5);
         break;
 
     case 0x0F:  /* Command Status: status, credits, opcode */
         if (len >= 6 && le16(ev + 4) == OP_INQUIRY) {
             log_line("inquiry: controller answered status %#04x", ev[2]);
+            if (ev[2] == 0) ((host_storage *)h)->inquiry_backoff = 0;
             if (ev[2] != 0) {
                 host_storage *bs = (host_storage *)h;
                 /* Refused: the radio is busy (the system's driver has it).
@@ -1512,16 +1560,9 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
                 bs->inquiry_at = now_ms() + bs->inquiry_backoff;
             }
         }
-        if (len >= 6 && le16(ev + 4) == OP_INQUIRY_CANCEL && ev[2] != 0) {
-            /* "Command disallowed" to a cancel is the controller saying no
-             * inquiry is running, which is exactly the state a lost Inquiry
-             * Complete left us believing otherwise. Either way the flag is
-             * cleared and the next poll may start one; the watchdog timer is
-             * not re-armed here, so a controller that keeps refusing is only
-             * asked again at the watchdog interval. */
-            if (h->inquiring) log_line("inquiry: cancel refused (status %#04x): no inquiry is running", ev[2]);
-            if (ev[2] == 0x0C) h->inquiring = 0;
-        }
+        /* A refused Inquiry Cancel, including 0x0C, does not prove the
+         * inquiry ended. Only Inquiry Complete or a successful cancel
+         * changes that state; expiry/watchdog retries remain bounded. */
         if (len >= 6 && (le16(ev + 4) == 0x200D || le16(ev + 4) == 0x200E)) {
             /* LE owns cancellation/backoff, including refused Create. The
              * Classic cleanup below must not retire its pending link. */
@@ -1615,9 +1656,10 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
             db_rec *r = db_put(h, ev + 2);
             memcpy(r->key, ev + 8, 16);
             r->type = ev[24];
-            db_save(h);
+            const int saved = db_save(h);
+            log_line("pad %s: paired, %s", addr_str(ev + 2),
+                     saved ? "key stored" : "key only in memory; reconnect after restart requires pairing");
         }
-        log_line("pad %s: paired, key stored", addr_str(ev + 2));
         break;
 
     case 0x31:  /* IO Capability Request */
@@ -1772,6 +1814,17 @@ static void pump(host_t *h, int timeout_ms)
     if (n < 0) transport_lost(h);
 }
 
+/* Cancellation is asynchronous too: do not send it every service tick while
+ * waiting for its completion/status event. Failed sends need the same bound. */
+static void cancel_inquiry(host_t *h)
+{
+    host_storage *bs = (host_storage *)h;
+    const long now = now_ms();
+    if (now < bs->inquiry_cancel_at) return;
+    bs->inquiry_cancel_at = now + T_INQUIRY_RETRY;
+    send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+}
+
 static void start_inquiry(host_t *h)
 {
     /* General inquiry, ~10 s, unlimited responses. */
@@ -1782,10 +1835,16 @@ static void start_inquiry(host_t *h)
 
         h->inquiring = 1;
         bs->t_inquiry = now_ms();
+        bs->inquiry_cancel_at = 0;
         bs->inquiry_at = 0;
-        bs->inquiry_backoff = 0;
+        /* Reset the backoff only when the controller accepts the inquiry. */
         log_line("inquiry: started");
     } else {
+        host_storage *bs = (host_storage *)h;
+        /* A failed send has no Command Status to schedule the next attempt. */
+        bs->inquiry_backoff = bs->inquiry_backoff ? bs->inquiry_backoff * 2 : T_INQUIRY_RETRY;
+        if (bs->inquiry_backoff > T_INQUIRY_RETRY_MAX) bs->inquiry_backoff = T_INQUIRY_RETRY_MAX;
+        bs->inquiry_at = now_ms() + bs->inquiry_backoff;
         static int fails;
         if (fails++ < 5) log_line("inquiry: the command could not be sent");
     }
@@ -1869,7 +1928,7 @@ void host_poll(host_t *h, int timeout_ms)
         if (h->inquiring && now - bs->t_inquiry > T_INQUIRY_WATCHDOG) {
             bs->t_inquiry = now;        /* asked again at most once per interval */
             log_line("inquiry: no completion after %d s, ending it", T_INQUIRY_WATCHDOG / 1000);
-            send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+            cancel_inquiry(h);
         }
         /* Keep searching through the pairing window, one pad at a time. */
         if (now < h->pair_until && !h->inquiring && !linking && !bs->repage_at &&
@@ -1877,7 +1936,7 @@ void host_poll(host_t *h, int timeout_ms)
             start_inquiry(h);
     }
     if (now >= h->pair_until && h->inquiring) {
-        send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+        cancel_inquiry(h);
     }
 }
 
@@ -2003,7 +2062,10 @@ int host_forget(host_t *h, const unsigned char addr[6])
         if (l->used && memcmp(link_identity(l), addr, 6) == 0)
             link_disconnect(h, l, "forgotten from the web page");
     }
-    db_forget(h, addr);
+    if (!db_forget(h, addr)) {
+        log_line("pad %s: forgotten in memory; store write failed", addr_str(addr));
+        return 0;
+    }
     log_line("pad %s: forgotten", addr_str(addr));
     return 1;
 }
