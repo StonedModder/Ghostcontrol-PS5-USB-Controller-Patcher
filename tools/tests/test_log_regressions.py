@@ -16,7 +16,7 @@ forget = source[forget_start:source.index('/* ---- GATT cache:')]
 identity = source[source.index('static const unsigned char *link_identity('):source.index('int host_paired_get(')]
 host_forget = source[source.index('int host_forget('):source.index('/* ---- controller setup')]
 start = source[source.index('static void start_inquiry('):source.index('void host_poll(')]
-status = source.split('if (len >= 6 && le16(ev + 4) == OP_INQUIRY) {', 1)[1].split('\n        if (len >= 6 && le16(ev + 4) == OP_INQUIRY_CANCEL', 1)[0]
+status = source.split('if (len >= 6 && le16(ev + 4) == OP_INQUIRY) {', 1)[1].split('\n        /* A refused Inquiry Cancel', 1)[0]
 harness = r'''
 #include "host_int.h"
 #include "util.h"

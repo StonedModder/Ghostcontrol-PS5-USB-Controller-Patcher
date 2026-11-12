@@ -57,6 +57,8 @@ typedef struct {
     long inquiry_backoff;
 } host_storage;
 
+static void cancel_inquiry(host_t *h);
+
 static int *classic_acl(host_t *h, const link_t *l)
 {
     return &((host_storage *)h)->classic_acl[slot_of(h, l)];
@@ -1006,19 +1008,21 @@ void link_input(host_t *h, link_t *l, const unsigned char *rep, int len)
 {
     int r;
 
-    if (h->dead || h->closing || !l->prof || len < 1) return;
+    if (h->dead || h->closing || !l->connected || l->disconnecting ||
+        !l->prof || len < 1) return;
     r = l->prof->parse(l->pctx.bytes, rep, len, &l->st);
     if (r == PARSE_FULL) l->full = 1;
     host_origin origin = captured_origin(h, l);
     if (((host_storage *)h)->qualified) {
         if (r != PARSE_NONE && l->ready)
             h->ev.on_state_qualified(h->ev.ud, slot_of(h, l), &origin, &l->st);
-        if (!h->dead && l->ready)
+        if (!h->dead && !h->closing && l->connected && !l->disconnecting && l->ready)
             h->ev.on_report_qualified(h->ev.ud, slot_of(h, l), &origin, rep, len);
     } else {
         if (r != PARSE_NONE && l->ready && h->ev.on_state)
             h->ev.on_state(h->ev.ud, slot_of(h, l), &l->st);
-        if (l->ready && h->ev.on_report)
+        if (!h->dead && !h->closing && l->connected && !l->disconnecting &&
+            l->ready && h->ev.on_report)
             h->ev.on_report(h->ev.ud, slot_of(h, l), rep, len);
     }
 }
@@ -1292,7 +1296,7 @@ static void pair_with(host_t *h, const unsigned char *rec)
     memcpy(((host_storage *)h)->last_call, rec, sizeof ((host_storage *)h)->last_call);
     if (!((host_storage *)h)->in_repage)
         ((host_storage *)h)->fresh_left = FRESH_LINK_TRIES;
-    if (h->inquiring) send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+    if (h->inquiring) cancel_inquiry(h);
 
     memcpy(p, rec, 6);
     put16(p + 6, 0xCC18);               /* DM1..DH5 */
@@ -1528,7 +1532,17 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
         h->cc_len = len < (int)sizeof h->cc ? len : (int)sizeof h->cc;
         memcpy(h->cc, ev, (size_t)h->cc_len);
         if (le16(ev + 3) == 0x200C && h->le_scan_pending > 0) --h->le_scan_pending;
-        if (le16(ev + 3) == OP_INQUIRY_CANCEL && ev[5] == 0) h->inquiring = 0;
+        if (le16(ev + 3) == OP_INQUIRY_CANCEL) {
+            host_storage *bs = (host_storage *)h;
+            /* Inquiry Cancel returns Command Complete (Core Vol 4, Part E
+             * 7.1.2). Disallowed can race the natural Inquiry Complete.
+             * A fresh inquiry resets this deadline: ignore an old reply. */
+            if ((bs->inquiry_cancel_at || h->closing) &&
+                ev[5] == 0) {
+                h->inquiring = 0;
+                bs->inquiry_cancel_at = 0;
+            }
+        }
         if (!h->closing) le_on_cmd_complete(h, le16(ev + 3), ev + 5, len - 5);
         break;
 
@@ -1546,16 +1560,9 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
                 bs->inquiry_at = now_ms() + bs->inquiry_backoff;
             }
         }
-        if (len >= 6 && le16(ev + 4) == OP_INQUIRY_CANCEL && ev[2] != 0) {
-            /* "Command disallowed" to a cancel is the controller saying no
-             * inquiry is running, which is exactly the state a lost Inquiry
-             * Complete left us believing otherwise. Either way the flag is
-             * cleared and the next poll may start one; the watchdog timer is
-             * not re-armed here, so a controller that keeps refusing is only
-             * asked again at the watchdog interval. */
-            if (h->inquiring) log_line("inquiry: cancel refused (status %#04x): no inquiry is running", ev[2]);
-            if (ev[2] == 0x0C) h->inquiring = 0;
-        }
+        /* A refused Inquiry Cancel, including 0x0C, does not prove the
+         * inquiry ended. Only Inquiry Complete or a successful cancel
+         * changes that state; expiry/watchdog retries remain bounded. */
         if (len >= 6 && (le16(ev + 4) == 0x200D || le16(ev + 4) == 0x200E)) {
             /* LE owns cancellation/backoff, including refused Create. The
              * Classic cleanup below must not retire its pending link. */

@@ -242,3 +242,52 @@ New GH5 Diagnostic/Precision captures (sdlemos, 2026-11-11) remain USB-only with
 VDA explicitly disabled. Public GH5 mapping and USB publication/ownership work
 belongs to PR #29. They cannot verify this Bluetooth cancellation fix, pairing
 persistence, VDA binding or guitar gameplay.
+
+
+## Specification and lifecycle audit follow-up
+
+Bluetooth SIG Core v6.0, Vol 4 Part E 7.1.2 specifies Command Complete for
+Inquiry Cancel; successful cancellation does not produce Inquiry Complete.
+The error-code definition of 0x0C means the controller cannot process the
+command in its current state, not proof that a procedure ended. Linux also
+documents the distinct race where Inquiry Complete precedes the cancel's
+Command Complete/0x0C:
+- https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-60/out/en/host-controller-interface/host-controller-interface-functional-specification.html
+- https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-60/out/en/architecture%2C-change-history%2C-and-conventions/controller-error-codes.html
+- https://git.ti.com/cgit/ti-linux-kernel/ti-linux-kernel/commit/?h=v4.19.151&id=f3fd4552a9bf7c14c8d9f4255cad5d8c78f24e63
+
+The old Command Status handler cleared inquiring on a refused cancel. A new
+regression reproduces that false state transition. Refusals now preserve
+inquiry state and bounded retries; actual Inquiry Complete or a successful
+cancel closes the procedure. Pairing-triggered cancellation uses the same
+tracked helper. A successful cancel from before a fresh start (which resets
+its deadline) is ignored instead of stopping the new search. Explicit
+synchronous shutdown retains its success handling. This is limited tracking,
+not transaction-ID correlation: HCI replies carry no per-request generation,
+and overlapping users of a shared radio still require console validation.
+
+A second regression reproduces input publication from a link whose asynchronous
+disconnect has begun. link_input now rejects disconnected/disconnecting links
+before parsing or publication, and rechecks lifecycle after the state callback
+before delivering raw input. Both qualified and legacy callback paths are
+covered, alongside normal input, closing hosts and empty reports. This closes
+a concrete stale-publication window, not a proven cause of the reported UI
+symptom. No encryption, pairing, radio-reset or virtual-pad policy is changed.
+
+Identity correction: 045e:0b22 is listed as Elite Series 2 BLE by the existing
+profile table and xpadneo; retain VID/PID in test records instead of assuming a
+Series X|S model. Reference: https://github.com/atar-axis/xpadneo
+PS5 retail controller support limits are documented by Sony, but do not verify
+this homebrew virtual-controller path:
+https://www.playstation.com/en-gb/support/games/ps5-backward-compatibility-games/
+Public payload SDK and virtual-pad research were reviewed as implementation
+references, not firmware-11.60 runtime proof:
+https://github.com/ps5-payload-dev/sdk
+https://github.com/almhtar/Ghostpad/blob/main/virtualDS5research.md
+No firmware patches or unsupported return-code interpretation are introduced.
+
+All three Bluetooth host suites, strict host/le syntax and whitespace checks
+pass locally. Console runtime and physical-controller behavior remain NOT
+VERIFIED. Roll back this follow-up commit if compatibility regresses; obtain
+independent review and retest normal input, stop/search expiry, disconnect,
+reconnect and the reported user-selection behavior using an identified ELF.
