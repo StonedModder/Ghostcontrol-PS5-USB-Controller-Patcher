@@ -829,7 +829,8 @@ static int hid_layout_same(const GcHidLayout *left, const GcHidLayout *right)
 {
     if (left->count != right->count || left->count > GC_HID_MAX_FIELDS ||
         left->numbered != right->numbered || left->axes != right->axes ||
-        left->features != right->features) return 0;
+        left->features != right->features ||
+        left->ps3_gh_guitar != right->ps3_gh_guitar) return 0;
     for (size_t index = 0; index < left->count; ++index) {
         const GcHidField *a = &left->fields[index], *b = &right->fields[index];
         if (a->offset != b->offset || a->page != b->page || a->usage != b->usage ||

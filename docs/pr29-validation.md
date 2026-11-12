@@ -205,3 +205,47 @@ so no VDA success/failure change or gameplay fix can be established from it.
 No new guitar-byte mapping, VDA marker or private Precision instrumentation is
 introduced. Revert this follow-up commit to roll back; review control-only HID
 compatibility and Nintendo IN/OUT traffic on hardware before release.
+
+
+## Source-backed PS3 Guitar Hero default button mapping
+
+The 2026-11-11 Precision capture supplied by sdlemos contains a 137-byte HID
+descriptor with 18 semantic fields, 16 raw fields and no report ID. Its first
+13 fields are Button 1–13. Generic decoding maps Button 1/2/3 to
+Cross/Circle/Square. Published PS3 Guitar Hero research instead identifies them
+as yellow/Square, green/Cross, red/Circle. Blue/Triangle and orange/L1 already
+match the generic mapping.
+
+References (protocol facts, independently implemented here):
+- https://github.com/TheNathannator/PlasticBand/blob/main/Docs/Instruments/5-Fret%20Guitar/Guitar%20Hero/PS3.md
+- https://santroller.github.io/guitar-configurator/controller-reverse-engineering/ps3-gh-guitar.html
+
+`gc_hid_set_device` selects the default button mapping only for 12ba:0100 after
+USB descriptor parsing. It leaves HID usages/offsets unchanged; semantic input,
+button arrays and removal of default mappings by custom HID profiles share the
+same button-mask helper. Other devices keep their existing mapping. Reusing a
+layout for another VID/PID clears the mapping flag. Service layout comparisons
+include the mapping flag so cached controls are reset if it changes. Both the
+resident and app-service USB readers consume this enumerated layout.
+
+`tools/tests/fixtures/gh5-hid.json` includes only the captured descriptor and two
+input records, with archive hash and original line numbers. Full logs and user
+identifiers are not committed. The regression compiles real gc_hid.c and
+gc_profile.c, reproduces the wrong first-fret output before the fix, and tests
+individual frets, chords/releases, strum, neutral hat values 0x0f/0x1f, a
+truncated report, custom override and unrelated-device isolation. Captured
+frames are replayed against documented protocol semantics; no physical action
+diary was supplied, so their meaning is not independently hardware-verified.
+
+This corrects the default face-button mapping, not virtual instrument identity.
+It adds no tilt threshold, motion calibration, instrument emulation or PS5 game
+compatibility claim. Existing custom profiles may have compensated for the old
+button ordering and need review. VDA binding/InsertData and gameplay still need
+PS5 retesting. Rollback: revert this mapping follow-up commit.
+
+FreeBSD 11.0's USB_FS_COMPLETE implementation returns EBUSY when its completion
+queue has no record; this supports retaining in-flight ownership rather than
+restarting on EBUSY. It does not establish identical PS5 behavior:
+https://github.com/freebsd/freebsd-src/blob/releng/11.0/sys/dev/usb/usb_generic.c
+The captures' poll_revents=0x41 includes read readiness, so simply removing write
+readiness is not demonstrated to fix their EBUSY pattern. No such change is made.
