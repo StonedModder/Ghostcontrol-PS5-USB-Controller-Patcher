@@ -11,5 +11,6 @@ jobs:
       - run: python3 -B tools/tests/test_usb_input_gate.py
       - run: python3 -B tools/tests/test_gh5_hid.py
       - run: python3 -B tools/tests/test_usb_completion.py
+      - run: python3 -B tools/tests/test_usb_progress.py
       - run: python3 -B tools/tests/test_usb_fallback.py
       - run: python3 -B tools/tests/test_ds4_bridge.py

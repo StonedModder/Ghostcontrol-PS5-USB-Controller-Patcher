@@ -13,6 +13,8 @@
 #include "gc_types.h"
 #include "gc_usb.h"
 #include "gc_usb_fallback.h"
+#include "gc_usb_progress.h"
+#include "bt/util.h"
 #include "controller_ds4.h"
 #include "controller_mamba.h"
 #include "controller_nintendo.h"
@@ -238,6 +240,7 @@ typedef struct {
     uint32_t lenp;
     int busy;
     GcUsbFallback fallback;
+    GcUsbProgress progress;
     /* Nintendo pads stay silent until 0x80 0x02 / 0x80 0x04 arrive, then speak
      * 0x30/0x3F. The handshake state machine is the resident line's proven one. */
     int nintendo;
@@ -250,6 +253,29 @@ typedef struct {
 } UsbFeed;
 
 static UsbFeed usb_feed[USB_SLOTS];
+static uint64_t usb_progress_generation;
+
+static void usb_progress_log(UsbFeed *feed)
+{
+    if (feed->vid != 0x12ba || feed->pid != 0x0100) return;
+    GcUsbProgress *p = &feed->progress;
+    const uint64_t now = (uint64_t)now_ms();
+    if (!gc_usb_progress_due(p, now)) return;
+    const int suspect = gc_usb_progress_suspect(p, now);
+    const char *phase = suspect ? "possible-stall" : p->suspect ? "progress-resumed" : "observe";
+    p->suspect = suspect;
+    log_line("usb progress: generation=%llu path=%s fd=%d iface=%d endpoint_address=%#x transfer_index=0 phase=%s starts=%llu completions=%llu EBUSY=%llu complete_errors=%llu inputs=%llu decoded=%llu rejected=%llu busy=%d poll_revents=%#x outstanding_ms=%lld since_complete_ms=%lld since_input_ms=%lld GET_REPORT_attempts=%llu",
+             (unsigned long long)p->generation, feed->path, feed->fd, feed->interface_number, feed->in_ep, phase,
+             (unsigned long long)p->starts, (unsigned long long)p->completions,
+             (unsigned long long)p->busy_returns, (unsigned long long)p->other_errors,
+             (unsigned long long)p->inputs, (unsigned long long)p->decoded, (unsigned long long)p->rejected,
+             feed->busy, p->poll_revents,
+             p->outstanding ? (long long)gc_usb_progress_age(now, p->started_ms) : -1LL,
+             p->have_completion ? (long long)gc_usb_progress_age(now, p->completed_ms) : -1LL,
+             p->have_input ? (long long)gc_usb_progress_age(now, p->input_ms) : -1LL,
+             (unsigned long long)feed->fallback.get_report_attempts);
+}
+
 static int usb_release_fd(UsbFeed *feed)
 {
     if (feed->close_uncertain) return -1;
@@ -1091,6 +1117,8 @@ static int usb_open_feed(UsbFeed *feed, const GcUsbDevice *device)
     feed->interface_number = device->interface_number;
     feed->alternate_setting = device->alternate_setting;
     feed->in_ep = device->in[0];
+    feed->progress.generation = ++usb_progress_generation;
+    feed->progress.opened_ms = (uint64_t)now_ms();
     feed->used = 1;
     feed->slot = -1;
     return 1;
@@ -1263,6 +1291,7 @@ static void usb_tick(void)
             describe_output(slot);
             source_snapshot_unlock();
         }
+        usb_progress_log(feed);
         /* A HID device can be silent until asked for an input report. Base
          * fallback on received interrupt traffic, even when RAW/probe mode
          * deliberately withholds decoded publication. State belongs to this
@@ -1319,7 +1348,10 @@ static void usb_tick(void)
             feed->ep[0].status = 0;
             memset(&st, 0, sizeof st);
             st.ep_index = 0;
-            if (ioctl(feed->fd, USB_FS_START, &st) == 0) feed->busy = 1;
+            if (ioctl(feed->fd, USB_FS_START, &st) == 0) {
+                feed->busy = 1;
+                gc_usb_progress_start(&feed->progress, (uint64_t)now_ms());
+            }
             else {
                 int err = errno;
                 static int noted_start;
@@ -1341,6 +1373,7 @@ static void usb_tick(void)
         ready.fd = feed->fd;
         ready.events = POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM;
         int polled = poll(&ready, 1, 0);
+        feed->progress.poll_revents = polled >= 0 ? ready.revents : 0;
         if (polled < 0) {
             int err = errno;
             if (err == EINTR) continue;
@@ -1357,6 +1390,8 @@ static void usb_tick(void)
         memset(&done, 0, sizeof done);
         if (ioctl(feed->fd, USB_FS_COMPLETE, &done) != 0) {
             int err = errno;
+            if (err == EBUSY) ++feed->progress.busy_returns;
+            else ++feed->progress.other_errors;
             static int noted_complete;
             if (noted_complete++ < 6)
                 log_line("usb: %s FS_COMPLETE failed errno=%d (%s) busy=%d",
@@ -1368,6 +1403,7 @@ static void usb_tick(void)
         /* Completion indices belong to the registered transfer array, not
          * USB endpoint addresses. An OUT completion does not release IN. */
         if (done.ep_index != 0) continue;
+        gc_usb_progress_complete(&feed->progress, (uint64_t)now_ms());
         if (feed->ep[0].status) {
             int status = feed->ep[0].status;
             static int noted_status;
@@ -1383,6 +1419,7 @@ static void usb_tick(void)
             usb_note_io(feed, 0, 0, 1);
             continue;
         }
+        gc_usb_progress_input(&feed->progress, (uint64_t)now_ms());
         gc_usb_fallback_interrupt(&feed->fallback, (uint64_t)now_ms());
         source_snapshot_lock();
         if (policy_revoked[feed->slot] || atomic_load_explicit(&source_fault,memory_order_acquire)) {
@@ -1390,7 +1427,10 @@ static void usb_tick(void)
         }
         raw_sample(feed->slot, feed->report, feed->lenp);
         source_snapshot_unlock();
-        if (!usb_decode(feed, &devices[i], &state)) continue;
+        if (!usb_decode(feed, &devices[i], &state)) {
+            ++feed->progress.rejected; continue;
+        }
+        ++feed->progress.decoded;
         remember(feed->slot, &state, devices[i].vid, devices[i].pid);
     }
 }

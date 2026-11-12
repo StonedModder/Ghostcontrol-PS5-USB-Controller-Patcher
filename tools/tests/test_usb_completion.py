@@ -14,9 +14,12 @@ harness = r'''
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include "gc_usb_progress.h"
+static uint64_t now_ms(void) { return 123; }
 #define USB_FS_COMPLETE 1
 struct usb_fs_complete { unsigned ep_index; };
 typedef struct {
+    GcUsbProgress progress;
     int fd, busy; char path[32]; uint32_t lenp; uint8_t report[64];
     struct { int status; unsigned aFrames; } ep[2];
 } Feed;
@@ -41,12 +44,14 @@ BLOCK
     return 0;
 }
 int main(void) {
-    Feed feed = {.busy=1, .lenp=27, .ep={{.aFrames=1}}};
+    Feed feed = {.progress={.outstanding=1}, .busy=1, .lenp=27, .ep={{.aFrames=1}}};
     complete_errno = EBUSY;
     assert(!complete(&feed) && feed.busy && notes == 1);
+    assert(feed.progress.busy_returns==1 && feed.progress.outstanding && !feed.progress.completions);
     complete_errno = 0; completed_index = 1; notes = 0;
     /* OUT completion must not clear an outstanding IN transfer. */
     assert(!complete(&feed) && feed.busy && notes == 0);
+    assert(!feed.progress.completions && feed.progress.outstanding);
     feed.ep[0].status = 99;
     assert(!complete(&feed) && feed.busy && notes == 0);
     completed_index = 0;
@@ -66,7 +71,7 @@ with tempfile.TemporaryDirectory(prefix='ghostcontrol-completion-') as directory
     work = Path(directory)
     (work / 'test.c').write_text(harness)
     subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
-        '-std=c11', '-Wall', '-Wextra', '-Werror', str(work / 'test.c'),
+        '-I', str(root / 'core/src'), '-std=c11', '-Wall', '-Wextra', '-Werror', str(work / 'test.c'),
         '-o', str(work / 'test')], check=True)
     subprocess.run([str(work / 'test')], check=True)
 print('PASS: completion ownership, EBUSY retention, status and frame/length validation')

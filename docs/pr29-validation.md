@@ -283,3 +283,56 @@ private marker behavior, firmware patch, instrument identity or tilt calibration
 is invented. Retest a known build with VDA enabled, exact ELF hash, recorded
 physical controls and the complete binding/insertion logs. No full local app
 build or PS5 execution was performed. Rollback: revert this follow-up commit.
+
+
+## Bounded EBUSY progress investigation
+
+GH5 receiver 12ba:0100 now gets `usb progress:` summaries at most once per
+second while its feed is serviced. Other devices do not get this extra output.
+The per-feed state resets at open/close and receives a monotonically increasing
+connection generation, so reused fd/slot values cannot join unrelated sessions.
+Summaries distinguish USB endpoint_address (for example 0x81) from transfer_index
+(0), and record successful IN starts/completions, EBUSY returns, other completion
+ioctl errors, valid input, interrupt decoder acceptance/rejection, poll readiness,
+GET_REPORT attempts and ages since completion/input/outstanding START. A missing
+completion/input age is -1. Completion metadata is not read on a failed ioctl.
+A completion count includes endpoint-error completions; valid-input counts are
+separate. Decoder counters describe interrupt data, not control fallback replies.
+
+`phase=possible-stall` means an outstanding transfer is at least 1 second old
+and no successful IN completion has been observed for at least 1 second. This
+is an observation threshold, not a validated hardware timeout or kernel error.
+An intentionally quiet/event-driven device could meet it. The next sampled
+non-suspect state is labelled progress-resumed. Samples can miss short episodes;
+last snapshots are lower bounds, not final lifetime totals or maximum stall ages.
+No automatic restart, close, USB request change or warning suppression is added.
+
+Tests simulate many EBUSY returns interleaved with 18-ms progress, no-progress
+pending state, recovery, bounded sample output, missing ages and connection reset.
+The production logger is compiled with printf-format checks. The production
+completion test checks EBUSY and OUT completions retain pending IN ownership.
+
+Controlled PS5 retest (console testing/captures remain credited to sdlemos):
+1. Record exact source/combined revision, executed ELF SHA-256, PS5 model,
+   firmware 11.60/loader version and variant. Ensure one service owns the receiver.
+   The log-only archive does not establish that its private Precision build
+   contains this public change; integrate it into that build explicitly if used.
+2. Start with Toolbox closed and VDA disabled; capture 10 seconds idle, each
+   fret/strum press and release with timestamps, then unplug/replug and repeat.
+   Preserve complete vpad/app-service logs and every connection generation.
+3. EBUSY rising alongside fresh completions/input demonstrates progress rather
+   than a permanent USB stall. If possible-stall persists while actively strumming,
+   inspect outstanding age and whether completions or only decoding stopped.
+4. Repeat the same sequence with VDA enabled in the marker-capable build, changing
+   only that variable. Capture AddDevice, kernel-log identification, binding and
+   first InsertData acceptance. A healthy USB stream with no binding is a separate
+   virtual-pad issue; accepted insertion does not establish game recognition.
+5. Compare the same known build/configuration before changing USB behavior. Use
+   the recorded failing transition to justify the next fix and hardware regression.
+
+FreeBSD reference (not proof of identical PS5 implementation):
+https://github.com/freebsd/freebsd-src/blob/releng/11.0/sys/dev/usb/usb_generic.c
+USB_FS_COMPLETE returns EBUSY when no queued completion is available. The
+captures' successful input between EBUSY returns does not establish the exact
+PS5 cause, competing-reader ownership or working gameplay. Hardware behavior of
+this instrumentation remains NOT VERIFIED. Rollback: revert this follow-up commit.
