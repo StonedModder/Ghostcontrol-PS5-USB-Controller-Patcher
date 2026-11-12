@@ -8,5 +8,6 @@ jobs:
       - run: python3 -B tools/tests/test_virtual_device.py
       - run: python3 -B tools/tests/test_vpad_log_source.py
       - run: python3 -B tools/tests/test_usb_input_gate.py
+      - run: python3 -B tools/tests/test_usb_completion.py
       - run: python3 -B tools/tests/test_usb_fallback.py
       - run: python3 -B tools/tests/test_ds4_bridge.py

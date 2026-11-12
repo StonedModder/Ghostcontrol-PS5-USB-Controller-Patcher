@@ -30,7 +30,7 @@ typedef struct {
 } UsbFeed;
 static GcHidState source_hid_values[1];
 static GcHidLayout source_hid_layout[1];
-static int out_fails;
+static int out_fails, profile_enabled;
 static void log_line(const char *format, ...) { (void)format; }
 #define LOG(...) log_line(__VA_ARGS__)
 static void source_snapshot_lock(void) {}
@@ -65,7 +65,7 @@ int gc_hid_input(const GcHidLayout *layout, const uint8_t *data, size_t size, Sc
 int gc_hid_state_update(GcHidState *state, const GcHidLayout *layout, const uint8_t *data, size_t size) {
     (void)state; (void)layout; (void)data; (void)size; return 0;
 }
-static int slot_profile(int slot, GcProfile *profile) { (void)slot; (void)profile; return 0; }
+static int slot_profile(int slot, GcProfile *profile) { (void)slot; (void)profile; return profile_enabled; }
 void gc_profile_apply(const GcProfile *profile, ScePadData *pad) { (void)profile; (void)pad; }
 void gc_rawmap_apply(const GcProfile *profile, const uint8_t *data, size_t size, ScePadData *pad) {
     (void)profile; (void)data; (void)size; (void)pad;
@@ -106,6 +106,32 @@ int main(void) {
     device.kind=GC_USB_INTERFACE_HID; device.vid=0x1234; device.layout.count=1;
     assert(usb_decode(&feed, &device, &state)); /* Keep generic HID learning. */
     assert(state.buttons == 0 && state.lx == 128 && source_hid_layout[0].count == 1);
+    /* An undecodable short control reply is not an interrupt learner sample.
+     * Preserve both the last published state and cached decoded controls. */
+    const ScePadData before_control = feed.decoded;
+    const pad_state before_state = state;
+    const uint8_t control_reply[] = {0, 0, 0x6f};
+    assert(!usb_decode_report(&feed, &device, &state, control_reply,
+                              sizeof control_reply, 0));
+    assert(!memcmp(&feed.decoded, &before_control, sizeof before_control));
+    assert(!memcmp(&state, &before_state, sizeof before_state));
+    profile_enabled = 1;
+    assert(!usb_decode_report(&feed, &device, &state, control_reply,
+                              sizeof control_reply, 0));
+    assert(!memcmp(&feed.decoded, &before_control, sizeof before_control));
+    assert(!memcmp(&state, &before_state, sizeof before_state));
+    profile_enabled = 0;
+    /* Real interrupt data retains the generic HID setup-learning path. */
+    assert(usb_decode_report(&feed, &device, &state, control_reply,
+                             sizeof control_reply, 1));
+    profile_enabled = 1;
+    assert(usb_decode_report(&feed, &device, &state, control_reply,
+                             sizeof control_reply, 1));
+    profile_enabled = 0;
+    /* A valid known-protocol control report is still accepted. */
+    device.vid = 0x054c; feed.report[0] = 1; feed.lenp = 64;
+    assert(usb_decode_report(&feed, &device, &state, feed.report, feed.lenp, 0));
+    assert(state.buttons == SCE_PAD_BUTTON_CROSS);
     return 0;
 }
 '''.replace('HANDLER', handler).replace('DECODE', decode)

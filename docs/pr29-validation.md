@@ -171,3 +171,37 @@ build that implements the marker, with exact ELF hash/build revision and
 AddDevice → kernel-log/MBus discovery → binding/user → InsertData results.
 Record timed individual fret/strum/whammy/tilt actions for replay fixtures;
 neutral-probe success alone does not establish a guitar mapping.
+
+
+## Control-report publication and completion ownership follow-up
+
+The remaining mapping/binding gaps prompted two further production-code fixes:
+
+- A rejected HID control reply could enter the generic raw-learning path and
+  publish neutral input; a saved profile could also convert rejection into
+  success without decoding that reply. Control-origin reports now require
+  decoder acceptance before profile application/publication. Interrupt input
+  retains setup learning and raw profiles. Valid known-protocol control data
+  remains accepted. This intentionally withholds undecodable control-only
+  devices; an explicit decoder is needed rather than inventing usable controls.
+- Completion index 1 (the Nintendo OUT transfer) previously cleared IN's busy
+  flag and could examine IN's endpoint status before checking ownership. The
+  reader now checks transfer index first. Only completion index 0 releases IN
+  and validates its status/frames/length. EBUSY still retains IN ownership.
+
+Both defects were reproduced by failing host regressions before their fixes.
+`test_usb_input_gate.py` covers control rejection with/without a saved profile,
+cached-state preservation, interrupt learning and accepted control data.
+`test_usb_completion.py` executes the production completion block with fake
+I/O, covering OUT completion, stale IN status, EBUSY, invalid frames/lengths
+and valid IN completion; it runs in CI. These tests do not emulate the PS5 USB
+kernel or provide a GH5 control mapping. Completion ownership is a preventive
+fix, not an established explanation for the GH5 EBUSY observations.
+
+Console evidence remains credited to sdlemos. The report's zero-GET_REPORT
+Precision capture does not exercise the control-rejection defect; no claim is
+made that either defect caused that captured session's behavior. VDA was off,
+so no VDA success/failure change or gameplay fix can be established from it.
+No new guitar-byte mapping, VDA marker or private Precision instrumentation is
+introduced. Revert this follow-up commit to roll back; review control-only HID
+compatibility and Nintendo IN/OUT traffic on hardware before release.

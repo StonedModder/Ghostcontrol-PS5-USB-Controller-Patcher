@@ -40,8 +40,8 @@ static void source_snapshot_unlock(void) {}
 static void log_line(const char *fmt, ...) { (void)fmt; }
 static void raw_sample(int slot, const void *data, unsigned length) { (void)slot; (void)data; (void)length; }
 static int usb_decode_report(Feed *feed, const Device *device, pad_state *state,
-                             const uint8_t *data, uint32_t length) {
-    (void)feed; (void)device; state->buttons = button_value;
+                             const uint8_t *data, uint32_t length, int interrupt_input) {
+    (void)feed; (void)device; assert(!interrupt_input); state->buttons = button_value;
     assert(length == 3 && data[2] == 0x6f); return decode_ok;
 }
 static void remember(int slot, pad_state *state, unsigned vid, unsigned pid) {

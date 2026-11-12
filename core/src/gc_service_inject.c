@@ -862,7 +862,7 @@ static int slot_profile(int slot, GcProfile *out)
 }
 
 static int usb_decode_report(UsbFeed *feed, const GcUsbDevice *device, pad_state *state,
-                             const uint8_t *report, uint32_t length)
+                             const uint8_t *report, uint32_t length, int interrupt_input)
 {
     ScePadData decoded = feed->decoded;
     int ok;
@@ -895,7 +895,9 @@ static int usb_decode_report(UsbFeed *feed, const GcUsbDevice *device, pad_state
         ds4_is_compatible_vidpid(device->vid, device->pid))
         ok = ds4_handle_packet(-1, NULL, report, length, &decoded);
     else if (device->kind == GC_USB_INTERFACE_HID) {
-        allow_raw_learning = 1;
+        /* Only interrupt input may qualify an undecoded source for raw
+         * learning. A short control reply is not proof of usable controls. */
+        allow_raw_learning = interrupt_input;
         source_snapshot_lock();
         GcHidState physical = source_hid_values[feed->slot];
         if (!hid_layout_same(&source_hid_layout[feed->slot], &device->layout)) {
@@ -921,7 +923,9 @@ static int usb_decode_report(UsbFeed *feed, const GcUsbDevice *device, pad_state
          * usages it is the only decoder there is. Profiles are data files, so a
          * newly supported controller arrives without an app update. */
         GcProfile slot_prof;
-        if (slot_profile(feed->slot, &slot_prof)) {
+        /* Profiles may rescue undecoded interrupt input for setup, but must
+         * not turn a rejected control response into a readable controller. */
+        if ((ok || interrupt_input) && slot_profile(feed->slot, &slot_prof)) {
             if (!ok) {
                 memset(&decoded, 0, sizeof decoded);
                 decoded.leftStick.x = decoded.leftStick.y = 128;
@@ -969,7 +973,7 @@ static int usb_decode_report(UsbFeed *feed, const GcUsbDevice *device, pad_state
 
 static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state)
 {
-    return usb_decode_report(feed, device, state, feed->report, feed->lenp);
+    return usb_decode_report(feed, device, state, feed->report, feed->lenp, 1);
 }
 
 /* Switch Pro and compatibles: they answer nothing until the two 0x80 reports
@@ -1299,7 +1303,7 @@ static void usb_tick(void)
                     raw_sample(feed->slot, reply, (size_t)poll.ucr_actlen);
                     source_snapshot_unlock();
                     if (usb_decode_report(feed, &devices[i], &state,
-                                          reply, (uint32_t)poll.ucr_actlen)) {
+                                          reply, (uint32_t)poll.ucr_actlen, 0)) {
                         feed->fallback.control_decoded = 1;
                         remember(feed->slot, &state, devices[i].vid, devices[i].pid);
                         continue;
@@ -1360,6 +1364,9 @@ static void usb_tick(void)
             if (usb_note_io(feed, err, 0, 0)) continue;
             continue;
         }
+        /* Completion indices belong to the registered transfer array, not
+         * USB endpoint addresses. An OUT completion does not release IN. */
+        if (done.ep_index != 0) continue;
         if (feed->ep[0].status) {
             int status = feed->ep[0].status;
             static int noted_status;
@@ -1370,7 +1377,7 @@ static void usb_tick(void)
             continue;
         }
         feed->busy = 0;
-        if (done.ep_index != 0 || feed->ep[0].aFrames != 1 ||
+        if (feed->ep[0].aFrames != 1 ||
             feed->lenp == 0 || feed->lenp > sizeof feed->report) {
             usb_note_io(feed, 0, 0, 1);
             continue;
