@@ -77,6 +77,7 @@ int32_t scePadReadState(int32_t handle, ScePadData *data);
 int32_t scePadVirtualDeviceAddDevice(void *param, int32_t deviceType);
 int32_t scePadVirtualDeviceInsertData(int32_t handle, const void *data);
 int32_t scePadVirtualDeviceDeleteDevice(int32_t handle);
+int32_t scePadVirtualDeviceGetRemoteSetting(int32_t handle, void *data, uint64_t size);
 
 /* From the payload SDK (ps5/kernel.h). */
 uint64_t kernel_get_ucred_authid(pid_t pid);
@@ -548,6 +549,85 @@ void vpad_poll(long now)
 int vpad_live(int slot)
 {
     return slot >= 0 && slot < HOST_MAX_PADS && g_slot[slot].st == VP_READY;
+}
+
+/* ---- game rumble read-back --------------------------------------------------
+ *
+ * When a game rumbles our virtual DualSense it calls scePadSetVibration on the
+ * console side; the system records the two motor levels in the device's
+ * "remote setting", which this process can read back locally with
+ * scePadVirtualDeviceGetRemoteSetting -- no game-memory hooking. vpad_rumble()
+ * turns that reading into two motor levels the BT output path drives onto the
+ * physical third-party controller.
+ *
+ * Three quirks, found on real PS5 hardware across several titles:
+ *   1. The offset of the motor bytes in the buffer VARIES by game/port (seen:
+ *      offset 4 at range 0-63; offsets 22/24 at 0-255; offsets 6/7). They all
+ *      rest at 0 and spike with rumble, while a handful of bytes carry constant
+ *      descriptor values. So instead of a fixed offset we take the MAX over the
+ *      region [1..31], skipping the known-constant descriptor bytes.
+ *   2. The buffer is STICKY: it keeps the last motor values after an effect
+ *      ends. A level unchanged for VPAD_RUMBLE_HOLD_MS is treated as ended and
+ *      forced to 0. Active rumble changes far faster than this, so a live
+ *      effect is never cut short.
+ *   3. Classic motors only -- DualSense haptics are a separate channel and are
+ *      not captured here.
+ */
+#define VPAD_RS_BUF         256
+#define VPAD_RUMBLE_LO        1
+#define VPAD_RUMBLE_HI       31
+#define VPAD_RUMBLE_HOLD_MS 350
+
+static int vpad_rs_descriptor(int off)
+{
+    /* Bytes seen holding a constant non-zero value at idle (device type,
+     * record headers, small flags) rather than rumble intensity. */
+    return off == 9 || off == 10 || off == 12 || off == 21 || off == 23;
+}
+
+static int vpad_rs_level(const uint8_t *buf)
+{
+    int level = 0, i;
+    for (i = VPAD_RUMBLE_LO; i <= VPAD_RUMBLE_HI; i++) {
+        if (vpad_rs_descriptor(i)) continue;
+        if (buf[i] > level) level = buf[i];
+    }
+    return level;
+}
+
+int vpad_rumble(int slot, uint8_t *strong, uint8_t *weak)
+{
+    static int      last_level[HOST_MAX_PADS];
+    static uint64_t last_change[HOST_MAX_PADS];
+    uint8_t buf[VPAD_RS_BUF];
+    int level, out;
+    uint64_t t;
+
+    if (slot < 0 || slot >= HOST_MAX_PADS || !strong || !weak)
+        return 0;
+    if (!vpad_live(slot)) {
+        last_level[slot] = 0;
+        last_change[slot] = 0;
+        return 0;
+    }
+    memset(buf, 0, sizeof buf);
+    if (scePadVirtualDeviceGetRemoteSetting(g_slot[slot].handle, buf, sizeof buf) != 0)
+        return 0;
+
+    level = vpad_rs_level(buf);
+    t = (uint64_t)now_ms();
+    if (level != last_level[slot]) {
+        last_level[slot] = level;
+        last_change[slot] = t;
+    }
+    /* Held past the timeout -> the game stopped rumbling; release the motors.
+     * The region max does not separate the two motors, so both are driven
+     * together and the engine's build_output maps them to heavy/light. */
+    out = (last_change[slot] && t - last_change[slot] >= (uint64_t)VPAD_RUMBLE_HOLD_MS)
+              ? 0 : level;
+    *strong = (uint8_t)out;
+    *weak = (uint8_t)out;
+    return 1;
 }
 
 void vpad_update(int slot, const pad_state *st)
