@@ -133,3 +133,41 @@ Do not label probe-disabled skips as decode failures, neutral probes as decoded
 controls, or requested ELF/source ZIP variants as reproduced without that tree.
 Record exact combined source and ELF hashes, then test RAW/probe-OFF and VDA/probe-ON
 in separate sessions. Hardware behavior of these new fallback changes is NOT VERIFIED.
+
+
+## 2026-11-11 Diagnostic / Precision follow-up
+
+[sdlemos](https://github.com/sdlemos) supplied the console tests, four logs and
+GH5 developer report. The new archive SHA-256 is
+`1442ffea72c342e6c998ed5897afb067a4b2b011bcff6c73e6a3c52372166464`.
+It contains logs only, not the executed ELF or matching source. Diagnostic has
+256 RAW records; Precision has 660, all 27-byte interrupt-IN samples, including
+436 after reconnect. Precision's latest per-generation completion counts sum
+to 2,650, with zero GET_REPORT attempts. Both sessions explicitly disable VDA.
+This is consistent with suppression during active interrupt traffic; it does
+not exercise the quiet-pipe fallback, prove the exact integrated revision,
+resolve EBUSY or establish guitar mapping/binding/gameplay.
+
+Reviewing that untested fallback path exposed a host-reproducible defect:
+`control_decoded` permanently stopped polling after the first successful
+control decode. A control-only device could publish a press without ever
+publishing its subsequent release. The flag is now diagnostic state only;
+quiet pipes continue polling at the existing minimum 250 ms interval, and
+recent interrupt input still suppresses requests for one second. The production
+fallback-block regression fails before the fix at the missing release, then
+passes with a second publication, retry bounds and renewed-interrupt suppression.
+The decoder is mocked: this does not validate GH5's report mapping or classify
+short control replies as real guitar input. Existing zero-reply filtering and
+interrupt buffer/START/poll/COMPLETE ownership are unchanged.
+
+The initial virtual-pad message now says "waiting for first readable input"
+rather than presenting the initial state as an established input failure.
+Rollback: revert this follow-up commit. Risk: control-only devices now receive
+continued bounded requests instead of one-shot polling; test that behavior on
+a controlled device, then repeat after reconnect. PS5 runtime is NOT VERIFIED.
+
+Next console evidence remains a separate Precision VDA-ON capture from the
+build that implements the marker, with exact ELF hash/build revision and
+AddDevice → kernel-log/MBus discovery → binding/user → InsertData results.
+Record timed individual fret/strum/whammy/tilt actions for replay fixtures;
+neutral-probe success alone does not establish a guitar mapping.

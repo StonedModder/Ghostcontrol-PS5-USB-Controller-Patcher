@@ -1452,7 +1452,7 @@ void gc_service_inject_tick(long now)
              * over FTP. Silence here is what made the softlock look like an
              * input-forwarding fault with no evidence either way. */
             no_input_noted[slot] = 1;
-            log_line("slot %d: virtual pad held back, no readable input from %s (%s)",
+            log_line("slot %d: virtual pad waiting for first readable input from %s (%s)",
                      slot, held_path, held_protocol);
         }
         if (!waiting_for_input && !backend_added[slot]) no_input_noted[slot] = 0;

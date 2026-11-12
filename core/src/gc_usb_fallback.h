@@ -23,7 +23,8 @@ static inline void gc_usb_fallback_interrupt(GcUsbFallback *state, uint64_t now)
 
 static inline int gc_usb_fallback_due(GcUsbFallback *state, uint64_t now)
 {
-    if (state->control_decoded) return 0;
+    /* A decoded control sample is not proof that interrupt input resumed.
+     * Keep polling a quiet pipe so later presses/releases can be delivered. */
     if (state->have_interrupt && (now < state->last_interrupt_ms ||
         now - state->last_interrupt_ms < GC_USB_INTERRUPT_RECENT_MS)) return 0;
     if (state->ticks < 6) ++state->ticks;

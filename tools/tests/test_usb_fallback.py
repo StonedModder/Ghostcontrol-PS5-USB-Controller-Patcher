@@ -28,6 +28,7 @@ typedef struct { int buttons; } pad_state;
 typedef struct { int fd, slot, busy; uint32_t lenp; char path[32]; uint8_t report[64]; GcUsbFallback fallback; } Feed;
 static Feed usb_feed[USB_SLOTS];
 static int last_valid[USB_SLOTS], calls, decode_ok, zero_reply, request_ok = 1;
+static int button_value = 1, published_buttons = -1, publications;
 static uint64_t clock_ms;
 struct usb_ctl_request {
     void *ucr_data; int ucr_flags, ucr_actlen;
@@ -40,11 +41,12 @@ static void log_line(const char *fmt, ...) { (void)fmt; }
 static void raw_sample(int slot, const void *data, unsigned length) { (void)slot; (void)data; (void)length; }
 static int usb_decode_report(Feed *feed, const Device *device, pad_state *state,
                              const uint8_t *data, uint32_t length) {
-    (void)feed; (void)device; (void)state;
+    (void)feed; (void)device; state->buttons = button_value;
     assert(length == 3 && data[2] == 0x6f); return decode_ok;
 }
 static void remember(int slot, pad_state *state, unsigned vid, unsigned pid) {
-    (void)state; (void)vid; (void)pid; last_valid[slot] = 1;
+    (void)vid; (void)pid; last_valid[slot] = 1;
+    published_buttons = state->buttons; ++publications;
 }
 static int ioctl(int fd, unsigned command, struct usb_ctl_request *request) {
     (void)fd; (void)command; ++calls;
@@ -73,6 +75,23 @@ int main(void) {
     assert(calls > 0 && calls <= 4);
     assert(feed->fallback.get_report_attempts == (unsigned)calls);
     assert(feed->fallback.get_report_failures == (unsigned)calls);
+    /* A successful fallback sample must not freeze a control-only device.
+     * Its next changed sample (release) must reach publication after 250 ms. */
+    memset(feed, 0, sizeof *feed); calls = publications = 0;
+    request_ok = decode_ok = 1; button_value = 1;
+    for (unsigned i=0; i<6; ++i) { clock_ms = 1000+i; tick(feed); }
+    assert(calls == 1 && published_buttons == 1 && publications == 1);
+    button_value = 0;
+    for (unsigned i=0; i<30; ++i) { clock_ms = 1100+i; tick(feed); }
+    assert(calls == 1); /* Success does not bypass the retry interval. */
+    clock_ms = 1255; tick(feed);
+    assert(calls == 2 && publications == 2 && published_buttons == 0);
+    assert(feed->fallback.get_report_successes == 2);
+    /* Renewed interrupt traffic suppresses control polling again. */
+    gc_usb_fallback_interrupt(&feed->fallback, 1300);
+    for (unsigned i=0; i<100; ++i) { clock_ms = 1300+i*10; tick(feed); }
+    assert(calls == 2);
+    button_value = 1;
     /* A replacement connection cannot inherit successful polling state. */
     memset(feed, 0, sizeof *feed); calls = 0; request_ok = decode_ok = 1;
     for (unsigned i=0; i<20; ++i) { clock_ms = 2000+i*10; tick(feed); }
