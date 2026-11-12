@@ -53,6 +53,7 @@ typedef struct {
     /* The inquiry command in flight, and the wait after a refused one. */
     long t_inquiry;
     long inquiry_at;
+    long inquiry_cancel_at;
     long inquiry_backoff;
 } host_storage;
 
@@ -1806,6 +1807,17 @@ static void pump(host_t *h, int timeout_ms)
     if (n < 0) transport_lost(h);
 }
 
+/* Cancellation is asynchronous too: do not send it every service tick while
+ * waiting for its completion/status event. Failed sends need the same bound. */
+static void cancel_inquiry(host_t *h)
+{
+    host_storage *bs = (host_storage *)h;
+    const long now = now_ms();
+    if (now < bs->inquiry_cancel_at) return;
+    bs->inquiry_cancel_at = now + T_INQUIRY_RETRY;
+    send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+}
+
 static void start_inquiry(host_t *h)
 {
     /* General inquiry, ~10 s, unlimited responses. */
@@ -1816,6 +1828,7 @@ static void start_inquiry(host_t *h)
 
         h->inquiring = 1;
         bs->t_inquiry = now_ms();
+        bs->inquiry_cancel_at = 0;
         bs->inquiry_at = 0;
         /* Reset the backoff only when the controller accepts the inquiry. */
         log_line("inquiry: started");
@@ -1908,7 +1921,7 @@ void host_poll(host_t *h, int timeout_ms)
         if (h->inquiring && now - bs->t_inquiry > T_INQUIRY_WATCHDOG) {
             bs->t_inquiry = now;        /* asked again at most once per interval */
             log_line("inquiry: no completion after %d s, ending it", T_INQUIRY_WATCHDOG / 1000);
-            send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+            cancel_inquiry(h);
         }
         /* Keep searching through the pairing window, one pad at a time. */
         if (now < h->pair_until && !h->inquiring && !linking && !bs->repage_at &&
@@ -1916,7 +1929,7 @@ void host_poll(host_t *h, int timeout_ms)
             start_inquiry(h);
     }
     if (now >= h->pair_until && h->inquiring) {
-        send_cmd(h, OP_INQUIRY_CANCEL, NULL, 0);
+        cancel_inquiry(h);
     }
 }
 

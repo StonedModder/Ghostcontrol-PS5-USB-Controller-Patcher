@@ -214,3 +214,31 @@ are implemented by the public PR.
 Next: record combined-source and ELF SHA-256, run RAW/probe-OFF and a separate
 clean VDA/probe-ON session, and preserve timed press/release sequences through
 reconnect. Full mapping, EBUSY root cause and game input remain NOT VERIFIED.
+
+
+## Bounded cancellation after the pairing window expires
+
+The earlier Xbox BLE/user-selection reports included repeated inquiry commands
+and 412 command-disallowed responses. Those captures do not establish which
+commands caused the foreground-control symptom. Source review nevertheless
+found a separate reproducible command flood: after pair_until expired, each
+host_poll tick sent OP_INQUIRY_CANCEL while awaiting an asynchronous reply.
+The watchdog could send another cancellation during the same poll.
+
+A shared watchdog/expiry helper now allows one cancellation per 500 ms,
+including failed sends and lost replies. It does not clear inquiring or invent
+completion; existing HCI events still own that transition. Starting a new
+inquiry resets the cancellation deadline. This does not stop searches when a
+controller becomes ready, disconnect a pad or change bonding policy.
+
+The production expired-window block regression fails before the fix at excess
+cancellation commands. Afterward it tests the active-window boundary, delayed
+answers, failed-send retries and no further requests after inquiry ends. The
+existing bond/inquiry regressions and host/le strict C11 syntax checks pass.
+Hardware behavior remains NOT VERIFIED. Revert this follow-up commit to roll
+back; repeat search-active/expired and Toolbox-open/closed tests on PS5.
+
+New GH5 Diagnostic/Precision captures (sdlemos, 2026-11-11) remain USB-only with
+VDA explicitly disabled. Public GH5 mapping and USB publication/ownership work
+belongs to PR #29. They cannot verify this Bluetooth cancellation fix, pairing
+persistence, VDA binding or guitar gameplay.

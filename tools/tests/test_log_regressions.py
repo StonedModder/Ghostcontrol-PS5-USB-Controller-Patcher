@@ -40,7 +40,7 @@ void link_disconnect(host_t *h, link_t *l, const char *why) {
 }
 static long clock_ms;
 long now_ms(void) { return clock_ms; }
-typedef struct { host_t host; long t_inquiry, inquiry_at; int inquiry_backoff; } host_storage;
+typedef struct { host_t host; long t_inquiry, inquiry_at, inquiry_cancel_at; int inquiry_backoff; } host_storage;
 static int send_ok = 1;
 int send_cmd(host_t *h, unsigned op, const void *data, int size) {
     (void)h; (void)op; (void)data; (void)size; return send_ok;
