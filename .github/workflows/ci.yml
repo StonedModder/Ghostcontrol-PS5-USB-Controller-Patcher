@@ -38,3 +38,51 @@ jobs:
 
       - name: Verify shipped QR assets
         run: python tools/make-qr-assets.py --verify-only
+
+  usb-host-tests:
+    name: USB host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # Production USB sources against stand-in FreeBSD headers, with the
+      # device calls intercepted; ASan/UBSan on. No console or SDK needed.
+      - name: Run the USB host tests
+        run: make -C core/tests/usb
+
+  ghosttooth-api:
+    name: Build GhosttoothAPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACBREW_VERSION: v0.40.3
+      PACBREW_SHA256: 0d71dd90c4ad6ef562923be0eb87ca8ce47825b6a2f209e04bb5d57d3359aee8
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the host LLVM the SDK drives
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18
+
+      - name: Fetch the pinned PS5 payload SDK (PacBrew)
+        run: |
+          set -euo pipefail
+          url="https://github.com/ps5-payload-dev/pacbrew-repo/releases/download/${PACBREW_VERSION}/ps5-payload-dev.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ps5-payload-dev.tar.gz" "$url"
+          echo "${PACBREW_SHA256}  $RUNNER_TEMP/ps5-payload-dev.tar.gz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pacbrew"
+          tar -xzf "$RUNNER_TEMP/ps5-payload-dev.tar.gz" -C "$RUNNER_TEMP/pacbrew"
+          echo "PS5_PAYLOAD_SDK=$RUNNER_TEMP/pacbrew/opt/ps5-payload-sdk" >> "$GITHUB_ENV"
+          echo "LLVM_CONFIG=llvm-config-18" >> "$GITHUB_ENV"
+
+      - name: Build the service (-Wall -Wextra -Wshadow -Werror)
+        run: make -C GhosttoothAPI -j"$(nproc)"
+
+      - name: Report the artifact
+        run: |
+          ls -l GhosttoothAPI/GhosttoothAPI.elf
+          sha256sum GhosttoothAPI/GhosttoothAPI.elf

@@ -146,6 +146,17 @@ int xbox_parse_guide(const uint8_t *buf, uint32_t len,
     return 1;
 }
 
+uint32_t xbox_take_initial_report(XboxControllerState *state,
+                                  uint8_t *report, uint32_t capacity) {
+    uint32_t length;
+    if (!state || !report || state->initial_report_length == 0) return 0;
+    length = state->initial_report_length;
+    state->initial_report_length = 0;
+    if (length > capacity) return 0;
+    memcpy(report, state->initial_report, length);
+    return length;
+}
+
 int xbox_requires_powera_rumble_init(uint16_t vid, uint16_t pid) {
     return vid == 0x24c6u &&
            (pid == 0x541au || pid == 0x542au || pid == 0x543au);
@@ -520,6 +531,7 @@ int xbox_gip_handshake(int fd, struct usb_fs_endpoint *eps,
     state->input_count = 0;
     state->cached_pad_valid = 0;
     state->guide_down = 0;
+    state->initial_report_length = 0;
     state->keep_running = keep_running;
     state->keep_running_context = context;
     if (!state->out_available) return -ENXIO;
@@ -575,7 +587,11 @@ int xbox_gip_handshake(int fd, struct usb_fs_endpoint *eps,
                     return 1;
                 }
             } else if (count >= 18 &&
-                       state->transfer_input[0] == GIP_CMD_INPUT) {
+                       state->transfer_input[0] == GIP_CMD_INPUT &&
+                       (size_t)count <= sizeof(state->initial_report)) {
+                memcpy(state->initial_report, state->transfer_input,
+                       (size_t)count);
+                state->initial_report_length = (uint32_t)count;
                 LOG("Xbox handshake done (already streaming)\n");
                 return 1;
             }

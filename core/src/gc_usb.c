@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <pthread.h>
 #include <sys/ioctl.h>
 #include <dev/usb/usb.h>
 #include <dev/usb/usb_ioctl.h>
@@ -83,6 +84,98 @@ static int read_hid_layout(int fd, int interface_index, uint8_t interface_number
     return parsed == 0 ? 0 : -1;
 }
 
+/* The scan runs several times a second, and read_hid_layout() fetches the
+ * report descriptor from the device every time. Some pads treat each fetch
+ * as a fresh host setup: a generic N64-style pad that enumerates as a Switch
+ * Pro Controller (057e:2009) restarted its 0x81 handshake on every scan and
+ * never streamed. Keep the parsed layout while the same device stays on the
+ * same node. The key also carries bcdDevice, so a different device or revision
+ * on the node is read afresh, and an entry is dropped when its feed is closed
+ * (gc_usb_hid_layout_forget) or a scan finds its node gone, so a device that
+ * later reuses the node is never given the previous device's layout. Scans run
+ * on more than one thread; the lock covers the table, never device I/O. */
+#define HID_LAYOUT_CACHE 8
+static struct {
+    int used;
+    char path[32];
+    uint16_t vid, pid, bcd_device, report_length;
+    int interface_index;
+    GcHidLayout layout;
+} hid_layout_cache[HID_LAYOUT_CACHE];
+static unsigned hid_layout_cache_next;
+static pthread_mutex_t hid_layout_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int read_hid_layout_cached(int fd, const char *path, uint16_t vid, uint16_t pid,
+                                  uint16_t bcd_device, int interface_index, uint8_t interface_number,
+                                  uint16_t report_length, GcHidLayout *layout)
+{
+    pthread_mutex_lock(&hid_layout_cache_lock);
+    for (unsigned i = 0; i < HID_LAYOUT_CACHE; ++i) {
+        if (hid_layout_cache[i].used && hid_layout_cache[i].vid == vid &&
+            hid_layout_cache[i].pid == pid &&
+            hid_layout_cache[i].bcd_device == bcd_device &&
+            hid_layout_cache[i].interface_index == interface_index &&
+            hid_layout_cache[i].report_length == report_length &&
+            !strcmp(hid_layout_cache[i].path, path)) {
+            *layout = hid_layout_cache[i].layout;
+            pthread_mutex_unlock(&hid_layout_cache_lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&hid_layout_cache_lock);
+    if (read_hid_layout(fd, interface_index, interface_number, report_length, layout) != 0)
+        return -1;
+    pthread_mutex_lock(&hid_layout_cache_lock);
+    unsigned slot = HID_LAYOUT_CACHE;
+    for (unsigned i = 0; i < HID_LAYOUT_CACHE && slot == HID_LAYOUT_CACHE; ++i)
+        if (hid_layout_cache[i].used && !strcmp(hid_layout_cache[i].path, path) &&
+            hid_layout_cache[i].interface_index == interface_index)
+            slot = i;                     /* same node, different device: replace */
+    if (slot == HID_LAYOUT_CACHE)
+        slot = hid_layout_cache_next++ % HID_LAYOUT_CACHE;
+    hid_layout_cache[slot].used = 1;
+    snprintf(hid_layout_cache[slot].path, sizeof(hid_layout_cache[slot].path), "%s", path);
+    hid_layout_cache[slot].vid = vid;
+    hid_layout_cache[slot].pid = pid;
+    hid_layout_cache[slot].bcd_device = bcd_device;
+    hid_layout_cache[slot].report_length = report_length;
+    hid_layout_cache[slot].interface_index = interface_index;
+    hid_layout_cache[slot].layout = *layout;
+    pthread_mutex_unlock(&hid_layout_cache_lock);
+    return 0;
+}
+
+/* Record that a scan found this node; returns the updated seen mask. */
+static unsigned hid_layout_cache_mark_seen(const char *path, unsigned seen)
+{
+    pthread_mutex_lock(&hid_layout_cache_lock);
+    for (unsigned i = 0; i < HID_LAYOUT_CACHE; ++i)
+        if (hid_layout_cache[i].used && !strcmp(hid_layout_cache[i].path, path))
+            seen |= 1u << i;
+    pthread_mutex_unlock(&hid_layout_cache_lock);
+    return seen;
+}
+
+void gc_usb_hid_layout_forget(const char *path)
+{
+    if (!path) return;
+    pthread_mutex_lock(&hid_layout_cache_lock);
+    for (unsigned i = 0; i < HID_LAYOUT_CACHE; ++i)
+        if (hid_layout_cache[i].used && !strcmp(hid_layout_cache[i].path, path))
+            hid_layout_cache[i].used = 0;
+    pthread_mutex_unlock(&hid_layout_cache_lock);
+}
+
+/* Forget every entry whose node the completed scan did not find. */
+static void hid_layout_cache_drop_unseen(unsigned seen)
+{
+    pthread_mutex_lock(&hid_layout_cache_lock);
+    for (unsigned i = 0; i < HID_LAYOUT_CACHE; ++i)
+        if (!(seen & (1u << i)))
+            hid_layout_cache[i].used = 0;
+    pthread_mutex_unlock(&hid_layout_cache_lock);
+}
+
 static void select_candidate(GcUsbDevice *device, const GcUsbCandidate *candidate)
 {
     /* Replace every candidate-owned field together; endpoints and HID layout
@@ -135,6 +228,7 @@ int gc_usb_inspect_matching(const char *path, GcUsbInterfaceKind required_kind,
     if (ioctl(fd, USB_GET_DEVICE_DESC, &desc) != 0) { close(fd); return -1; }
     device->vid = UGETW(desc.idVendor);
     device->pid = UGETW(desc.idProduct);
+    const uint16_t bcd_device = UGETW(desc.bcdDevice);
     snprintf(device->path, sizeof(device->path), "%s", path);
     int config = 0;
     if (ioctl(fd, USB_GET_CONFIG, &config) != 0 || config < 0 || config > 255) {
@@ -190,8 +284,8 @@ int gc_usb_inspect_matching(const char *path, GcUsbInterfaceKind required_kind,
             }
             int hid_valid = 0;
             if (d[5] == 3 && d[6] != 1 && d[3] == 0)
-                hid_valid = read_hid_layout(fd, index, d[2],
-                    hid_report_length, &candidate.layout) == 0;
+                hid_valid = read_hid_layout_cached(fd, path, device->vid, device->pid,
+                    bcd_device, index, d[2], hid_report_length, &candidate.layout) == 0;
             candidate.kind = gc_usb_classify_interface(
                 d[5], d[6], d[7], d[3], hid_valid);
             int eligible = candidate.kind != GC_USB_INTERFACE_NONE &&
@@ -230,8 +324,11 @@ size_t gc_usb_devices(GcUsbDevice *devices, size_t capacity)
     DIR *directory = opendir("/dev");
     if (!directory) return 0;
     size_t count = 0;
+    unsigned seen = 0;
     struct dirent *entry;
-    while (count < capacity && (entry = readdir(directory))) {
+    /* Walks every node even once the caller's array is full: a node past the
+     * capacity is still present and must keep its cached layout. */
+    while ((entry = readdir(directory))) {
         unsigned bus, address;
         char extra;
         if (sscanf(entry->d_name, "ugen%u.%u%c", &bus, &address, &extra) != 2 || address <= 1)
@@ -239,8 +336,10 @@ size_t gc_usb_devices(GcUsbDevice *devices, size_t capacity)
         char path[32];
         int length = snprintf(path, sizeof(path), "/dev/ugen%u.%u", bus, address);
         if (length < 0 || (size_t)length >= sizeof(path)) continue;
-        if (gc_usb_inspect(path, &devices[count]) == 0) ++count;
+        if (count < capacity && gc_usb_inspect(path, &devices[count]) == 0) ++count;
+        seen = hid_layout_cache_mark_seen(path, seen); /* after inspect, which may add one */
     }
     closedir(directory);
+    hid_layout_cache_drop_unseen(seen);
     return count;
 }

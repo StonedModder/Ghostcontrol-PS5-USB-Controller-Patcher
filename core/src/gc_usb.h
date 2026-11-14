@@ -167,6 +167,9 @@ int gc_usb_inspect(const char *path, GcUsbDevice *device);
 int gc_usb_inspect_matching(const char *path, GcUsbInterfaceKind required_kind,
                             int interface_number, GcUsbDevice *device);
 size_t gc_usb_devices(GcUsbDevice *devices, size_t capacity);
+/* Drop the cached HID layout for a node, e.g. when its feed is closed: the
+ * next inspection of that path reads the report descriptor again. */
+void gc_usb_hid_layout_forget(const char *path);
 /* Best-effort HID SET_IDLE. duration_4ms=2 requests an 8 ms periodic report;
  * devices that only report changes may ignore or stall this request. */
 int gc_usb_hid_set_idle(int fd, uint8_t interface_number,

@@ -55,6 +55,10 @@ typedef struct {
     ScePadData cached_pad;
     uint8_t cached_pad_valid;
     uint8_t guide_down;
+    /* The INPUT report that ended the handshake, until the feed collects it.
+     * GIP reports only on change, so dropping it would lose held controls. */
+    uint8_t initial_report[64];
+    uint32_t initial_report_length;
 #ifndef XBOX_PARSER_TEST
     /* USB_FS may finish cancellation after the handshake call returns. Keep
      * all buffers and frame-length storage alive for the USB thread lifetime. */
@@ -91,6 +95,11 @@ void xbox_parse_and_cache_input(const uint8_t *buf, ScePadData *out_pad,
 int xbox_parse_guide(const uint8_t *buf, uint32_t len,
                      ScePadData *out_pad, XboxControllerState *state);
 int xbox_requires_powera_rumble_init(uint16_t vid, uint16_t pid);
+
+/* Copy out the INPUT report consumed by the handshake, once. Returns its
+ * length, or 0 when there is none or it does not fit in capacity. */
+uint32_t xbox_take_initial_report(XboxControllerState *state,
+                                  uint8_t *report, uint32_t capacity);
 
 #ifndef XBOX_PARSER_TEST
 /* GIP handshake: catch ANNOUNCE → ACK → POWER.
