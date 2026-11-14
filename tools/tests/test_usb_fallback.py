@@ -15,6 +15,7 @@ harness = r'''
 #include <string.h>
 #include <errno.h>
 #include "gc_usb_fallback.h"
+#include "gc_gh5_mode.h"
 #define USB_SLOTS 2
 #define USB_REPORT 64
 #define GC_USB_INTERFACE_HID 1

@@ -14,6 +14,7 @@
 #include "gc_usb.h"
 #include "gc_usb_fallback.h"
 #include "gc_usb_progress.h"
+#include "gc_gh5_mode.h"
 #include "bt/util.h"
 #include "controller_ds4.h"
 #include "controller_mamba.h"
@@ -264,11 +265,13 @@ static void usb_progress_log(UsbFeed *feed)
     const int suspect = gc_usb_progress_suspect(p, now);
     const char *phase = suspect ? "possible-stall" : p->suspect ? "progress-resumed" : "observe";
     p->suspect = suspect;
-    log_line("usb progress: generation=%llu path=%s fd=%d iface=%d endpoint_address=%#x transfer_index=0 phase=%s starts=%llu completions=%llu EBUSY=%llu complete_errors=%llu inputs=%llu decoded=%llu rejected=%llu busy=%d poll_revents=%#x outstanding_ms=%lld since_complete_ms=%lld since_input_ms=%lld GET_REPORT_attempts=%llu",
+    log_line("usb progress: generation=%llu path=%s fd=%d iface=%d endpoint_address=%#x transfer_index=0 phase=%s starts=%llu completions=%llu EBUSY=%llu complete_errors=%llu inputs=%llu decode_attempts=%llu decoded=%llu rejected=%llu decode_skipped=%llu neutral_probes=%llu busy=%d poll_revents=%#x outstanding_ms=%lld since_complete_ms=%lld since_input_ms=%lld GET_REPORT_attempts=%llu",
              (unsigned long long)p->generation, feed->path, feed->fd, feed->interface_number, feed->in_ep, phase,
              (unsigned long long)p->starts, (unsigned long long)p->completions,
              (unsigned long long)p->busy_returns, (unsigned long long)p->other_errors,
-             (unsigned long long)p->inputs, (unsigned long long)p->decoded, (unsigned long long)p->rejected,
+             (unsigned long long)p->inputs, (unsigned long long)p->decode_attempts,
+             (unsigned long long)p->decoded, (unsigned long long)p->rejected,
+             (unsigned long long)p->skipped, (unsigned long long)p->neutral_probes,
              feed->busy, p->poll_revents,
              p->outstanding ? (long long)gc_usb_progress_age(now, p->started_ms) : -1LL,
              p->have_completion ? (long long)gc_usb_progress_age(now, p->completed_ms) : -1LL,
@@ -617,6 +620,8 @@ void gc_service_inject_init(void)
     for (i = 0; i < USB_SLOTS; ++i) usb_feed[i].fd = -1;
     sources_active = 1;
     inject_ready = vpad_init();
+    log_line("GH5 build: variant=%s source=%s mode=%s receiver=12ba:0100 (not an ELF hash)",
+             GC_BUILD_VARIANT, GC_BUILD_REVISION, gc_gh5_mode_name());
     if (!inject_ready) {
         fprintf(stderr, "inject: virtual DualSense setup did not start\n");
     } else {
@@ -1000,7 +1005,14 @@ static int usb_decode_report(UsbFeed *feed, const GcUsbDevice *device, pad_state
 
 static int usb_decode(UsbFeed *feed, const GcUsbDevice *device, pad_state *state)
 {
-    return usb_decode_report(feed, device, state, feed->report, feed->lenp, 1);
+    const int policy = gc_gh5_policy(device->vid, device->pid);
+    if (policy == GC_USB_DECODE_SKIPPED) return policy;
+    if (policy == GC_USB_DECODE_NEUTRAL_PROBE) {
+        pad_state_reset(state);
+        return policy;
+    }
+    return usb_decode_report(feed, device, state, feed->report, feed->lenp, 1)
+        ? GC_USB_DECODE_CONTROLS : GC_USB_DECODE_REJECTED;
 }
 
 /* Switch Pro and compatibles: they answer nothing until the two 0x80 reports
@@ -1296,7 +1308,8 @@ static void usb_tick(void)
          * fallback on received interrupt traffic, even when RAW/probe mode
          * deliberately withholds decoded publication. State belongs to this
          * connection, and failed/undecodable replies are rate limited. */
-        if (devices[i].kind == GC_USB_INTERFACE_HID) {
+        if (devices[i].kind == GC_USB_INTERFACE_HID &&
+            gc_gh5_allows_fallback(devices[i].vid, devices[i].pid)) {
             if (gc_usb_fallback_due(&feed->fallback, (uint64_t)now_ms())) {
                 uint8_t reply[USB_REPORT];
                 struct usb_ctl_request poll;
@@ -1427,10 +1440,8 @@ static void usb_tick(void)
         }
         raw_sample(feed->slot, feed->report, feed->lenp);
         source_snapshot_unlock();
-        if (!usb_decode(feed, &devices[i], &state)) {
-            ++feed->progress.rejected; continue;
-        }
-        ++feed->progress.decoded;
+        const int decoded_result = usb_decode(feed, &devices[i], &state);
+        if (!gc_usb_progress_decode(&feed->progress, decoded_result)) continue;
         remember(feed->slot, &state, devices[i].vid, devices[i].pid);
     }
 }

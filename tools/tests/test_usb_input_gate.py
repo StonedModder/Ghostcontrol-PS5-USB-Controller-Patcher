@@ -17,6 +17,7 @@ harness = r'''
 #include <stdio.h>
 #include <string.h>
 #include "gc_hid.h"
+#include "gc_gh5_mode.h"
 #include "gc_rawmap.h"
 #include "bt/pad.h"
 #define NINTENDO_PARSER_TEST

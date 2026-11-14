@@ -57,6 +57,15 @@ int main(void) {
     gc_usb_progress_start(&p,20000);
     assert(!gc_usb_progress_suspect(&p,20999));
     assert(gc_usb_progress_suspect(&p,21000));
+    /* Observation skips and neutral probes are not parser failures/successes. */
+    GcUsbProgress decode={0};
+    assert(!gc_usb_progress_decode(&decode,GC_USB_DECODE_SKIPPED));
+    assert(decode.skipped==1 && !decode.decode_attempts && !decode.rejected);
+    assert(gc_usb_progress_decode(&decode,GC_USB_DECODE_NEUTRAL_PROBE));
+    assert(decode.neutral_probes==1 && !decode.decode_attempts && !decode.decoded);
+    assert(!gc_usb_progress_decode(&decode,GC_USB_DECODE_REJECTED));
+    assert(gc_usb_progress_decode(&decode,GC_USB_DECODE_CONTROLS));
+    assert(decode.decode_attempts==2 && decode.rejected==1 && decode.decoded==1);
     UsbFeed feed={.vid=0x12ba,.pid=0x0100,.fd=12,.in_ep=0x81,.busy=1};
     feed.progress.generation=7; strcpy(feed.path,"/dev/ugen2.2");
     gc_usb_progress_start(&feed.progress,0);

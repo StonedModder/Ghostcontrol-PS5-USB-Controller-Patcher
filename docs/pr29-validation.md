@@ -336,3 +336,105 @@ USB_FS_COMPLETE returns EBUSY when no queued completion is available. The
 captures' successful input between EBUSY returns does not establish the exact
 PS5 cause, competing-reader ownership or working gameplay. Hardware behavior of
 this instrumentation remains NOT VERIFIED. Rollback: revert this follow-up commit.
+
+
+## Public reproducible GH5 transport/binding/mapped test variants
+
+The 2026-11-12 archive provided by sdlemos has SHA-256
+`daac66d72ad101436090bfbdf0a5387789b0e920acadf1bd5c23c59b6193baa4`.
+All four log hashes match his comparison report. Diagnostic retains 256 RAW
+records; Precision retains 544, including 341 after reconnect, with 24 excluded
+log samples. The 54/48 public progress snapshots all remain observe; sampled
+completion ages reach 27/26 ms. These do not establish a permanent EBUSY stall.
+VDA is disabled in both; Precision explicitly records decode_attempts=0 and
+probe_disabled_skips. The public rejected counter in that private integration
+therefore incorrectly includes deliberate skips. The source ZIPs described by
+the report are not supplied here; their claimed contents/tests are not
+independently certified by this change.
+
+The public companion now provides three build-time variants using its existing
+full resident source closure. All use the same receiver/transfer machinery and
+only gate GH5 receiver 12ba:0100. Other devices keep ordinary behavior.
+
+| VARIANT | Output ELF | GH5 publication |
+|---|---|---|
+| gh5-raw | GhosttoothAPI-gh5-raw.elf | No publication; observe valid transport and raw snapshot availability. |
+| gh5-neutral | GhosttoothAPI-gh5-neutral.elf | Explicit neutral binding probe; not decoded fret input. |
+| gh5-mapped | GhosttoothAPI-gh5-mapped.elf | Real resident decoder, profiles and virtual-pad path. |
+
+The ordinary resident build remains mapped by default. These are new public
+variants, not the private gh5-diagnostic/gh5-precision packages. The old private
+marker is not used. Replace the private diagnostic interception rather than
+stacking it in front of mapped mode if porting these changes into that tree.
+RAW means no decoded publication, not a new lossless packet recorder: existing
+raw snapshots remain available, but this change adds no per-packet hex logger or
+private Precision sampler. Use action-labelled capture tools separately.
+
+Build commands for a maintainer with the real SDK (not executed in this task):
+
+```sh
+make -C GhosttoothAPI PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk VARIANT=gh5-raw
+make -C GhosttoothAPI PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk VARIANT=gh5-neutral
+make -C GhosttoothAPI PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk VARIANT=gh5-mapped
+sha256sum GhosttoothAPI/GhosttoothAPI-gh5-*.elf
+```
+
+Launch only one service variant at a time using the project's normal lifecycle.
+The neutral probe can create a user-assignment prompt without usable guitar
+controls; keep a working controller available. RAW/neutral modes disable GH5
+control fallback to prevent a control reply bypassing their publication gate.
+Mapped mode retains the bounded fallback and normal decoder acceptance rules.
+Do not use RAW/neutral to claim idle fallback or physical mapping success.
+
+Each service startup logs GH5 mode, companion variant and git-describe revision
+(including tracked dirty state). This label is not an ELF hash, source-tree
+manifest, SDK revision or firmware attestation. Builds outside Git say unknown;
+record actual ELF SHA-256, SDK/version, local/untracked changes and loader in the
+sidecar test note. Do not overwrite historical source-package metadata to imply
+that those packages include these variants.
+
+Decode results are explicit: rejected, real controls, skipped-by-design or
+neutral probe. Only controls/neutral outcomes authorize publication. Progress
+separates decode_attempts, decoded, rejected, decode_skipped and neutral_probes.
+Skips/probes do not increment attempts or decode failures/successes. Only the
+private variant's owner can update its interception path to return the matching
+outcome; adopting the public header alone does not repair an old private return 0.
+
+Host tests compile the production GH5 dispatcher for all three modes, verify
+publication/counter/fallback isolation and unrelated-device behavior, and expand
+the real Makefile with a host-only toolchain fixture to check flags/names/source
+closure. This is Makefile expansion, not a PS5 build. Real HID/profile replay and
+production injection-construction tests remain separate gates. Firmware ABI,
+physical controls, binding and gameplay remain NOT VERIFIED.
+
+### Instrument identity and source research
+
+The requested compatibility target includes Guitar Hero titles run on PS5 and
+homebrew apps. A virtual DualSense carries ordinary pad controls; it is not a
+verified virtual GH5 instrument. A homebrew or emulator can map ordinary pad
+controls, while another game may use USB instrument identity/protocol. Record
+app/game/version and execution environment per result; do not extrapolate.
+
+Sources reviewed:
+- https://github.com/FGGstore/FGG-XSense — public direct /dev/hid virtual-gamepad
+  research, with the author's reported 11.60 test. Its kernel-report layout is
+  distinct from ScePadData. It is a candidate backend reference, not verified
+  guitar identity or our console result. No ioctl ABI/backend was copied or enabled.
+- https://github.com/almhtar/Ghostpad/blob/main/virtualDS5research.md — virtual
+  DualSense research using process/firmware patching; not adopted as a blind fix.
+- https://github.com/InvoxiPlayGames/OrbisInstrumentalizer — PS4 game-specific
+  instrument hooks with stated game/version limits, not a verified PS5 plugin.
+- https://s1.santroller.com/console_guides/authentication.html — documents separate
+  instrument/gamepad paths and game-specific exceptions; no universal identity proof.
+
+No verified universal virtual GH5 implementation for PS5 was established by this
+research. A direct HID backend or game adapter needs its own architecture/ABI,
+ownership/cleanup and target-game validation before adoption. No firmware patch,
+SDK material or third-party implementation is committed here.
+
+Acceptance sequence: RAW transport → neutral creation/identification/bind and
+accepted InsertData → mapped physical fret/chord/strum/axis press/release tests →
+correct foreground user/game response → instrument recognition where required.
+Preserve failures and exact artifacts per stage. Rollback: revert this follow-up
+commit to remove the public variants/accounting changes; prior resident behavior
+and required checks remain available. Independent review is required.

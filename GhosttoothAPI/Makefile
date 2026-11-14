@@ -12,13 +12,15 @@ else
 endif
 
 VARIANT ?= resident
-ifeq ($(filter $(VARIANT),resident diagnostic resident-no-capture),)
-    $(error VARIANT must be resident, resident-no-capture, or diagnostic)
+ifeq ($(filter $(VARIANT),resident diagnostic resident-no-capture gh5-raw gh5-neutral gh5-mapped),)
+    $(error VARIANT must be resident, resident-no-capture, diagnostic, gh5-raw, gh5-neutral, or gh5-mapped)
 endif
 ifeq ($(VARIANT),diagnostic)
 ELF := GhosttoothAPI-diagnostic.elf
 else ifeq ($(VARIANT),resident-no-capture)
 ELF := GhosttoothAPI-resident-no-capture.elf
+else ifneq ($(filter $(VARIANT),gh5-raw gh5-neutral gh5-mapped),)
+ELF := GhosttoothAPI-$(VARIANT).elf
 else
 ELF := GhosttoothAPI.elf
 endif
@@ -91,6 +93,19 @@ endif
 ifeq ($(VARIANT),resident-no-capture)
 VARIANT_CFLAGS := -DGC_APP_SERVICE_NO_AUDIO_CAPTURE=1
 endif
+
+# GH5 modes use the full resident source closure; only 12ba:0100 is gated.
+ifeq ($(VARIANT),gh5-raw)
+VARIANT_CFLAGS += -DGC_GH5_MODE=1
+endif
+ifeq ($(VARIANT),gh5-neutral)
+VARIANT_CFLAGS += -DGC_GH5_MODE=2
+endif
+ifeq ($(VARIANT),gh5-mapped)
+VARIANT_CFLAGS += -DGC_GH5_MODE=3
+endif
+GC_BUILD_REVISION := $(shell git -C $(ROOT) describe --always --dirty 2>/dev/null || echo unknown)
+VARIANT_CFLAGS += -DGC_BUILD_REVISION=\"$(GC_BUILD_REVISION)\" -DGC_BUILD_VARIANT=\"$(VARIANT)\"
 
 # CA path must be set before CFLAGS so .incbin embeds the real bundle.
 GC_CA_BUNDLE ?= $(PORTS)/etc/ca-bundle.crt
