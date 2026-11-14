@@ -38,3 +38,17 @@ jobs:
 
       - name: Verify shipped QR assets
         run: python tools/make-qr-assets.py --verify-only
+
+  rumble-host-tests:
+    name: Rumble parser host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # The production rumble read-back decode against real hardware captures
+      # plus the lightbar/flag/split-motor/sustained cases, under ASan/UBSan.
+      # No console or SDK needed.
+      - name: Run the rumble parser host tests
+        run: make -C core/tests/rumble
