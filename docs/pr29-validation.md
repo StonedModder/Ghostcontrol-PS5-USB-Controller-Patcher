@@ -1,5 +1,59 @@
 # PR 29 validation
 
+## Earlier RAW baseline received 2026-11-14
+
+Console testing and logs: [sdlemos](https://github.com/sdlemos).
+These captures preceded delivery of our public three-mode ELF test package.
+They are not hardware validation of that package or of the mapped decoder.
+Archive `test (1).zip` SHA-256:
+`afda7ec138edf4839d9667ba093cf1579d403fc280fdb2d29499f66de0a9c31c`.
+
+| Earlier capture | RAW samples | Distinct payloads | Public progress samples | Largest sampled completion age |
+| --- | ---: | ---: | ---: | ---: |
+| Diagnostic | 256 | 49 | 55 | 18 ms |
+| Precision | 631 | 81 | 40 | 25 ms |
+
+All public progress samples report `phase=observe`. EBUSY occurs while later
+completions and input continue. This does not establish its kernel-level cause
+or exclude stalls between samples; it provides no reason to reset pending
+transfers merely because EBUSY occurred. Both sessions explicitly disable VDA
+probing; decoded, rejected and neutral-probe counts remain zero while
+`raw_only_skipped` tracks input. Those zeros are not parser failures or evidence
+that binding or gameplay works.
+
+The 133,957-byte Diagnostic app-service log is an exact prefix of the Precision
+app-service log. Do not sum their totals as separate runs. Its final STATUS
+request is followed immediately by its response in the longer file: the shorter
+file ends at a capture boundary, not a demonstrated service crash.
+
+`tools/tests/fixtures/gh5-hid-20261114.json` retains every distinct RAW payload
+within each session (130 replay entries, potentially shared between sessions),
+with original file, line number and log hash. The 137-byte descriptors match the
+existing fixture. `test_gh5_hid.py` replays these through the actual public HID
+decoder, checks the six published button masks, releases between packets, and
+checks truncated packets leave output unchanged. This is a host regression
+test against the published protocol mapping, not validation of unlabelled
+physical fret/strum/whammy/tilt actions.
+
+The accompanying report discusses private logger counters, sampler budgeting
+and `GC_GH5_USB_DIAGNOSTIC`. Those implementations are absent from this public
+branch. Their alleged source defects cannot be reproduced or patched here
+without the matching private source. Do not copy their RAW interception into
+the public mapped path. Existing `test_gh5_modes.py`, `test_usb_completion.py`
+and `test_usb_progress.py` cover public dispatch, pending-transfer handling and
+progress observation; these captures justify retaining those protections.
+
+For the next comparison, identify each ELF by external SHA-256 and startup
+variant/source banner; record console model, firmware and loader. Collect logs
+separately after each isolated RAW, neutral and mapped session. First establish
+startup and transport, then AddDevice/identification/bind and first accepted
+InsertData with neutral mode. Only after that test mapped presses/releases,
+strum and axes with timestamped physical-action notes and a named app/game.
+The earlier runs do not provide these acceptance results. New test package
+hardware execution remains **NOT VERIFIED**; its previously recorded historical
+import-baseline failure also remains outstanding. This follow-up changes only
+host regression coverage and evidence; reverting it changes no runtime behavior.
+
 ## Automated checks
 
 Run `python3 -B tools/tests/test_virtual_device.py` and

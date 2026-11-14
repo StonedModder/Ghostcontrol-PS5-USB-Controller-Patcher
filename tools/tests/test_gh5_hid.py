@@ -12,6 +12,12 @@ fixture = json.loads((root / 'tools/tests/fixtures/gh5-hid.json').read_text())
 arrays = 'static const uint8_t descriptor[] = {' + ','.join(str(x) for x in bytes.fromhex(fixture['descriptor'])) + '};\n'
 for i, report in enumerate(fixture['reports']):
     arrays += 'static const uint8_t recorded%d[] = {' % i + ','.join(str(x) for x in bytes.fromhex(report['hex'])) + '};\n'
+baseline = json.loads((root / 'tools/tests/fixtures/gh5-hid-20261114.json').read_text())
+captured = [bytes.fromhex(report['hex']) for capture in baseline['captures']
+            for report in capture['reports']]
+assert len(captured) == 130 and all(len(report) == 27 for report in captured)
+arrays += 'static const uint8_t baseline[][27] = {\n' + ',\n'.join(
+    '{' + ','.join(str(x) for x in report) + '}' for report in captured) + '};\n'
 harness = r'''
 #include <assert.h>
 #include <string.h>
@@ -75,6 +81,25 @@ int main(void) {
     gc_hid_set_device(&layout, 0x12ba, 0x0200);
     assert(gc_hid_input(&layout, report, sizeof report, &pad));
     assert(pad.buttons == SCE_PAD_BUTTON_CROSS);
+    /* Replay every distinct packet from both earlier private RAW captures.
+     * This checks the public decoder against the published button mapping,
+     * not unrecorded physical actions or private virtual-device behavior. */
+    gc_hid_set_device(&layout, 0x12ba, 0x0100);
+    const uint32_t fret_mask = SCE_PAD_BUTTON_SQUARE | SCE_PAD_BUTTON_CROSS |
+        SCE_PAD_BUTTON_CIRCLE | SCE_PAD_BUTTON_TRIANGLE |
+        SCE_PAD_BUTTON_L1 | SCE_PAD_BUTTON_R1;
+    for (unsigned i = 0; i < sizeof baseline / sizeof baseline[0]; ++i) {
+        assert(gc_hid_input(&layout, baseline[i], sizeof baseline[i], &pad));
+        uint32_t expected_buttons = 0;
+        for (unsigned bit = 0; bit < 6; ++bit)
+            if (baseline[i][0] & (1u << bit)) expected_buttons |= masks[bit];
+        assert((pad.buttons & fret_mask) == expected_buttons);
+        saved = pad;
+        assert(!gc_hid_input(&layout, baseline[i], 3, &pad));
+        assert(!memcmp(&saved, &pad, sizeof pad));
+        assert(gc_hid_input(&layout, recorded0, sizeof recorded0, &pad));
+        assert(!(pad.buttons & fret_mask));
+    }
     gc_hid_set_device(&layout, 0x057e, 0x2009);
     assert(!layout.ps3_gh_guitar);
     return 0;
@@ -89,4 +114,4 @@ with tempfile.TemporaryDirectory(prefix='ghostcontrol-gh5-hid-') as directory:
         str(root / 'core/src/gc_hid.c'), str(root / 'core/src/gc_profile.c'),
         '-Wl,--gc-sections', '-lm', '-o', str(work / 'test')], check=True)
     subprocess.run([str(work / 'test')], check=True)
-print('PASS: captured GH5 HID layout, frets/chords/releases, strum, custom mapping and device isolation')
+print('PASS: GH5 HID layout, 130 captured packet replays, frets/releases, strum, custom mapping and device isolation')
