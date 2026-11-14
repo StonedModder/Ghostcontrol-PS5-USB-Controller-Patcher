@@ -192,6 +192,8 @@ int gc_usb_inspect_matching(const char *path, GcUsbInterfaceKind required_kind,
             if (d[5] == 3 && d[6] != 1 && d[3] == 0)
                 hid_valid = read_hid_layout(fd, index, d[2],
                     hid_report_length, &candidate.layout) == 0;
+            if (hid_valid)
+                gc_hid_set_device(&candidate.layout, device->vid, device->pid);
             candidate.kind = gc_usb_classify_interface(
                 d[5], d[6], d[7], d[3], hid_valid);
             int eligible = candidate.kind != GC_USB_INTERFACE_NONE &&

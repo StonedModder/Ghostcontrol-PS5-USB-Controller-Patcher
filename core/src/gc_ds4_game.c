@@ -28,7 +28,7 @@
 #define GC_DS4_PAD_VENDOR 0x60u
 #define GC_DS4_PAD_PRODUCT 0x62u
 #define GC_GATEWAY_SIZE 32u
-#define GC_STUB_OFFSET (GC_GATEWAY_SIZE * GC_DS4_LIBPAD_SYMBOLS)
+#define GC_STUB_OFFSET (GC_GATEWAY_SIZE * GC_DS4_GAME_LIBPAD_SYMBOLS)
 
 static int make_code(intptr_t mapping, uint8_t code[GC_DS4_TARGET_PAGE_SIZE]);
 
@@ -141,9 +141,9 @@ find_libpad_object(pid_t pid, intptr_t base, GcDynlibObject *output)
 }
 
 static int
-symbol_kind(const char name[12], const char nids[GC_DS4_LIBPAD_SYMBOLS][12])
+symbol_kind(const char name[12], const char nids[GC_DS4_GAME_LIBPAD_SYMBOLS][12])
 {
-    for (unsigned kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind) {
+    for (unsigned kind = 0; kind < GC_DS4_GAME_LIBPAD_SYMBOLS; ++kind) {
         if (memcmp(name, nids[kind], 11) == 0)
             return (int)kind;
     }
@@ -152,17 +152,17 @@ symbol_kind(const char name[12], const char nids[GC_DS4_LIBPAD_SYMBOLS][12])
 
 static int
 collect_imports(pid_t pid, intptr_t libpad_base,
-                const intptr_t originals[GC_DS4_LIBPAD_SYMBOLS],
+                const intptr_t originals[GC_DS4_GAME_LIBPAD_SYMBOLS],
                 GcImportPlan *plan)
 {
-    static const char *const names[GC_DS4_LIBPAD_SYMBOLS] = {
+    static const char *const names[GC_DS4_GAME_LIBPAD_SYMBOLS] = {
         "scePadReadState", "scePadReadStateExt", "scePadRead",
         "scePadReadExt", "scePadGetDataInternal",
-        "scePadGetControllerInformation"
+        "scePadGetControllerInformation", "scePadSetVibration"
     };
-    char nids[GC_DS4_LIBPAD_SYMBOLS][12];
+    char nids[GC_DS4_GAME_LIBPAD_SYMBOLS][12];
     memset(plan, 0, sizeof(*plan));
-    for (unsigned kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind) {
+    for (unsigned kind = 0; kind < GC_DS4_GAME_LIBPAD_SYMBOLS; ++kind) {
         memset(nids[kind], 0, sizeof(nids[kind]));
         nid_encode(names[kind], nids[kind]);
     }
@@ -289,18 +289,18 @@ collect_imports(pid_t pid, intptr_t libpad_base,
 
 static int
 verify_library_evidence(pid_t pid, intptr_t base,
-                        const intptr_t originals[GC_DS4_LIBPAD_SYMBOLS],
+                        const intptr_t originals[GC_DS4_GAME_LIBPAD_SYMBOLS],
                         const GcDs4LibpadEvidence *source)
 {
+    const uint32_t required_evidence = (UINT32_C(1) << 6) - 1u;
     if (!source || source->firmware != kernel_get_fw_version() ||
-        source->fingerprint_mask !=
-            ((UINT32_C(1) << GC_DS4_LIBPAD_SYMBOLS) - 1u) ||
+        (source->fingerprint_mask & required_evidence) != required_evidence ||
         !source->controller_info_abi)
         return -1;
     GcDynlibObject object;
     if (find_libpad_object(pid, base, &object) != 0)
         return -1;
-    for (size_t kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind) {
+    for (size_t kind = 0; kind < 6; ++kind) {
         if (originals[kind] < base ||
             object.mapsize < 256 ||
             (uint64_t)(originals[kind] - base) > object.mapsize - 256)
@@ -309,6 +309,11 @@ verify_library_evidence(pid_t pid, intptr_t base,
         if (gc_remote_read(pid, originals[kind], code, sizeof(code)) != 0 ||
             fnv1a64(code, sizeof(code)) != source->fingerprints[kind])
             return -1;
+    }
+    if ((source->fingerprint_mask & (UINT32_C(1) << 6)) && originals[6] > 0) {
+        uint8_t code[256];
+        if (gc_remote_read(pid, originals[6], code, sizeof(code)) != 0 ||
+            fnv1a64(code, sizeof(code)) != source->fingerprints[6]) return -1;
     }
     return 0;
 }
@@ -353,7 +358,7 @@ static int wrapper_target(pid_t pid, const GcDynlibObject *object,
 }
 
 static int read_game_pads(pid_t pid, const GcDynlibObject *object,
-                          const intptr_t originals[GC_DS4_LIBPAD_SYMBOLS],
+                          const intptr_t originals[GC_DS4_GAME_LIBPAD_SYMBOLS],
                           GcDs4GamePad pads[24])
 {
     intptr_t targets[5];
@@ -541,13 +546,14 @@ int gc_ds4_game_validate(const GcDs4GameBridge *bridge, const GcDs4SourceReader 
     return 0;
 }
 
-static const uintptr_t stub_functions[GC_DS4_LIBPAD_SYMBOLS] = {
+static const uintptr_t stub_functions[GC_DS4_GAME_LIBPAD_SYMBOLS] = {
     (uintptr_t)gc_ds4_game_read_state_stub,
     (uintptr_t)gc_ds4_game_read_state_ext_stub,
     (uintptr_t)gc_ds4_game_read_stub,
     (uintptr_t)gc_ds4_game_read_ext_stub,
     (uintptr_t)gc_ds4_game_data_internal_stub,
-    (uintptr_t)gc_ds4_game_controller_info_stub
+    (uintptr_t)gc_ds4_game_controller_info_stub,
+    (uintptr_t)gc_ds4_game_set_vibration_stub
 };
 
 static int make_code(intptr_t mapping, uint8_t code[GC_DS4_TARGET_PAGE_SIZE])
@@ -559,7 +565,7 @@ static int make_code(intptr_t mapping, uint8_t code[GC_DS4_TARGET_PAGE_SIZE])
     memset(code, 0xcc, GC_DS4_TARGET_PAGE_SIZE);
     memcpy(code + GC_STUB_OFFSET, (const void *)first, end - first);
     intptr_t args = mapping + GC_DS4_TARGET_PAGE_SIZE;
-    for (unsigned kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind) {
+    for (unsigned kind = 0; kind < GC_DS4_GAME_LIBPAD_SYMBOLS; ++kind) {
         if (stub_functions[kind] < first || stub_functions[kind] >= end) return -1;
         uint8_t *gateway = code + kind * GC_GATEWAY_SIZE;
         intptr_t target = mapping + GC_STUB_OFFSET + (intptr_t)(stub_functions[kind] - first);
@@ -575,7 +581,7 @@ static int make_code(intptr_t mapping, uint8_t code[GC_DS4_TARGET_PAGE_SIZE])
 /* Recover only our exact compiled code and a complete independently discovered
  * import plan. No PID or address from a persisted text file is trusted. */
 static int adopt_retained(GcDs4GameBridge *bridge, pid_t pid, const GcImportPlan *plan,
-                          const intptr_t originals[GC_DS4_LIBPAD_SYMBOLS])
+                          const intptr_t originals[GC_DS4_GAME_LIBPAD_SYMBOLS])
 {
     intptr_t mapping = plan->retained_mapping;
     GcDs4GameArgs args;
@@ -620,10 +626,11 @@ int gc_ds4_game_install(GcDs4GameBridge *bridge, const GcDs4SourceReader *source
     if (gc_remote_get_library(pid, "libScePad", &pad) ||
         (gc_remote_get_library(pid, "libkernel", &kernel) &&
          gc_remote_get_library(pid, "libkernel_sys", &kernel))) return -1;
-    intptr_t originals[GC_DS4_LIBPAD_SYMBOLS];
+    intptr_t originals[GC_DS4_GAME_LIBPAD_SYMBOLS];
     const char *names[] = {"scePadReadState", "scePadReadStateExt", "scePadRead",
-        "scePadReadExt", "scePadGetDataInternal", "scePadGetControllerInformation"};
-    for (unsigned kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind)
+        "scePadReadExt", "scePadGetDataInternal", "scePadGetControllerInformation",
+        "scePadSetVibration"};
+    for (unsigned kind = 0; kind < GC_DS4_GAME_LIBPAD_SYMBOLS; ++kind)
         originals[kind] = gc_remote_resolve(pid, pad, names[kind]);
     intptr_t clock_fn = gc_remote_resolve(pid, kernel, "clock_gettime");
     intptr_t base = kernel_dynlib_mapbase_addr(pid, pad);
@@ -712,6 +719,7 @@ int gc_ds4_game_install(GcDs4GameBridge *bridge, const GcDs4SourceReader *source
                         &bridge->routing_epoch, sizeof(bridge->routing_epoch))) goto fail;
     bridge->route_count = route_count;
     memcpy(bridge->routes, routes, route_count * sizeof(routes[0]));
+    memset(bridge->rumble_sequences, 0, sizeof(bridge->rumble_sequences));
     memcpy(bridge->sources, source->sources, sizeof(bridge->sources));
     memcpy(bridge->hooks, plan.hooks, plan.count * sizeof(plan.hooks[0]));
     bridge->hook_count = 0;
@@ -777,8 +785,33 @@ int gc_ds4_game_status(const GcDs4GameBridge *bridge, GcDs4GameStatus *status)
         args.magic != GC_DS4_GAME_MAGIC || args.layout != GC_DS4_GAME_LAYOUT) return -1;
     status->sequence = args.sequence; status->deadline_ns = args.deadline_ns;
     status->publications = args.publications;
-    for (unsigned kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind) status->calls[kind] = args.calls[kind];
+    for (unsigned kind = 0; kind < GC_DS4_GAME_LIBPAD_SYMBOLS; ++kind) status->calls[kind] = args.calls[kind];
     status->lease_expirations = args.lease_expirations;
     status->snapshot_fallbacks = args.snapshot_fallbacks;
     return 0;
+}
+
+int gc_ds4_game_rumble(const GcDs4GameBridge *bridge, unsigned route,
+                       uint32_t *sequence, uint8_t *large, uint8_t *small)
+{
+    if (!bridge || !sequence || !large || !small ||
+        bridge->state != GC_DS4_GAME_LIVE || route >= bridge->route_count ||
+        !live_identity(bridge)) return -1;
+    const intptr_t address = bridge->args_address + offsetof(GcDs4GameArgs, rumble) +
+        route * sizeof(GcDs4GameRumble);
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        GcDs4GameRumble first, second;
+        if (gc_remote_read(bridge->pid, address, &first, sizeof(first)) ||
+            gc_remote_read(bridge->pid, address, &second, sizeof(second))) return -1;
+        if (first.sequence == second.sequence && !(second.sequence & 1u)) {
+            *sequence = second.sequence;
+            /* The first payload is bracketed by the two sequence reads.
+             * A writer can start after the second copy reads its sequence,
+             * so that copy's payload is not protected by this check. */
+            *large = first.large;
+            *small = first.small;
+            return 0;
+        }
+    }
+    return -1;
 }

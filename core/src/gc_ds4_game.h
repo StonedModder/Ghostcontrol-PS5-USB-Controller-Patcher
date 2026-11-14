@@ -8,6 +8,7 @@
 #include "gc_ds4_source.h"
 
 #define GC_DS4_MAX_IMPORT_HOOKS 64u
+#define GC_DS4_GAME_LIBPAD_SYMBOLS 7u
 
 typedef struct {
     intptr_t slot;
@@ -38,6 +39,7 @@ typedef struct {
     GcDs4GameState state;
     GcDs4Route routes[GC_DS4_MAX_ROUTES];
     GcDs4ImportHook hooks[GC_DS4_MAX_IMPORT_HOOKS];
+    uint32_t rumble_sequences[GC_DS4_MAX_ROUTES];
 } GcDs4GameBridge;
 
 typedef struct {
@@ -48,7 +50,7 @@ typedef struct {
     uint32_t sequence;
     uint64_t deadline_ns;
     uint64_t publications;
-    uint64_t calls[GC_DS4_LIBPAD_SYMBOLS];
+    uint64_t calls[GC_DS4_GAME_LIBPAD_SYMBOLS];
     uint64_t lease_expirations;
     uint64_t snapshot_fallbacks;
 } GcDs4GameStatus;
@@ -60,6 +62,8 @@ int gc_ds4_game_publish(GcDs4GameBridge *bridge,
                         const GcDs4SourceSnapshot *snapshot);
 int gc_ds4_game_status(const GcDs4GameBridge *bridge,
                        GcDs4GameStatus *status);
+int gc_ds4_game_rumble(const GcDs4GameBridge *bridge, unsigned route,
+                       uint32_t *sequence, uint8_t *large, uint8_t *small);
 int gc_ds4_game_remove(GcDs4GameBridge *bridge);
 int gc_ds4_game_quiesce(GcDs4GameBridge *bridge);
 int gc_ds4_game_validate(const GcDs4GameBridge *bridge, const GcDs4SourceReader *source);

@@ -127,7 +127,7 @@ static inline GcUsbIoClass gc_usb_io_classify(int errno_value, int endpoint_stat
                                               int short_invalid)
 {
     if (errno_value == ENODEV || errno_value == ENXIO || errno_value == EBADF ||
-        errno_value == ENOENT)
+        errno_value == ENOENT || errno_value == ENOTTY)
         return GC_USB_IO_FATAL;
     if (endpoint_status == GC_USB_ERR_NO_PIPE ||
         endpoint_status == GC_USB_ERR_NOT_CONFIGURED)
