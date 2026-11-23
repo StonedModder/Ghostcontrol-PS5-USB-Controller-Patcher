@@ -21,10 +21,13 @@
 #define OP_LINK_KEY_REPLY       0x040B
 #define OP_LINK_KEY_NEG_REPLY   0x040C
 #define OP_PIN_CODE_REPLY       0x040D
+#define OP_PIN_CODE_NEG_REPLY   0x040E
 #define OP_AUTH_REQUESTED       0x0411
 #define OP_SET_ENCRYPTION       0x0413
 #define OP_IO_CAP_REPLY         0x042B
 #define OP_USER_CONFIRM_REPLY   0x042C
+#define OP_USER_CONFIRM_NEG_REPLY 0x042D
+#define OP_IO_CAP_NEG_REPLY     0x0434
 #define OP_SET_EVENT_MASK       0x0C01
 #define OP_WRITE_LOCAL_NAME     0x0C13
 #define OP_WRITE_SCAN_ENABLE    0x0C1A
@@ -306,6 +309,7 @@ struct host {
     int le_scan_last;               /* last scan enable value sent */
     long t_scan;
     link_t *dhkey_owner;            /* the link a DHKey is being made for */
+    long t_dhkey;                   /* when dhkey_owner's request was sent */
 
     /* LE address hold: no attempt on an address until a given time. */
     struct { unsigned char addr[6]; long until; } le_hold[4];

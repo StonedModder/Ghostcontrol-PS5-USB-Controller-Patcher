@@ -87,6 +87,7 @@ enum {
 #define T_SMP_STEP       4000   
 #define T_ENC            4000   /* encryption with a stored key */
 #define T_KEYS           3000   /* the pad's keys after encryption */
+#define T_DHKEY          5000   /* Generate DHKey to its Complete event */
 #define T_ATT_RESEND     1500
 #define ATT_TRIES           4
 #define T_SCAN_REFRESH   5000
@@ -586,7 +587,10 @@ void le_on_meta(host_t *h, const unsigned char *ev, int len)
     case 0x09:  /* Generate DHKey Complete */
         l = h->dhkey_owner;
         h->dhkey_owner = NULL;
-        if (!l || !l->used) break;
+        /* Only a link still waiting for it takes the key: the owner's slot
+         * may have been freed and given to another pad since it asked
+         * (link_free clears dhkey_asked). */
+        if (!l || !l->used || !l->le_s.dhkey_asked || l->le_s.have_dhkey) break;
         if (len >= 34 && ev[1] == 0) {
             memcpy(l->le_s.dhkey, ev + 2, 32);
             l->le_s.have_dhkey = 1;
@@ -836,8 +840,19 @@ static void smp_step(host_t *h, link_t *l, long now)
     }
     if (e->smp == SMP_DONE || e->smp == SMP_FAILED || e->smp == SMP_KEYS) return;
 
+    /* The controller makes one DHKey at a time, so the first link to ask
+     * owns it until Generate DHKey Complete. If that event never arrives
+     * (lost on the shared event endpoint, or the command refused by
+     * Command Status), the claim used to hold forever and every later
+     * Secure Connections pairing waited in SMP_WAIT_DHKEY until the
+     * transport restarted. Release a claim that has gone unanswered. */
+    if (h->dhkey_owner && now - h->t_dhkey > T_DHKEY) {
+        log_line("le: DHKey request unanswered for %d ms; releasing it", T_DHKEY);
+        h->dhkey_owner = NULL;
+    }
     if (e->sc && e->have_pkb && !e->dhkey_asked && !h->dhkey_owner) {
         h->dhkey_owner = l;
+        h->t_dhkey = now;
         send_cmd(h, OP_LE_GENERATE_DHKEY, e->pkb, 64);
         e->dhkey_asked = 1;
     }
@@ -974,19 +989,29 @@ static void on_smp(host_t *h, link_t *l, const uint8_t *d, int n)
         link_disconnect(h, l, "pairing refused");
         break;
 
+    /* Key distribution belongs to the end of a pairing we are running: after
+     * encryption starts (the keys can overtake the Encryption Change event)
+     * and before it completes. Accepted in any other state, a bonded
+     * reconnect could rewrite id_addr before encrypting, point link_db() at
+     * another pad's bond, and then delete that bond by failing encryption
+     * with 0x06. */
     case SMP_ENC_INFO:
+        if (e->smp != SMP_ENCRYPTING && e->smp != SMP_KEYS) break;
         if (n >= 17) memcpy(e->dist_ltk, d + 1, 16);
         break;
     case SMP_CENTRAL_ID:
+        if (e->smp != SMP_ENCRYPTING && e->smp != SMP_KEYS) break;
         if (n < 11) break;
         e->dist_ediv = (uint16_t)le16(d + 1);
         memcpy(e->dist_rand, d + 3, 8);
         e->keys_got |= 0x01;
         break;
     case SMP_ID_INFO:
+        if (e->smp != SMP_ENCRYPTING && e->smp != SMP_KEYS) break;
         if (n >= 17) memcpy(e->dist_irk, d + 1, 16);
         break;
     case SMP_ID_ADDR:
+        if (e->smp != SMP_ENCRYPTING && e->smp != SMP_KEYS) break;
         if (n < 8) break;
         e->id_type = d[1];
         memcpy(e->id_addr, d + 2, 6);
@@ -1555,7 +1580,8 @@ void le_step(host_t *h, link_t *l, long now)
          * read, the service walk and the report map: it may only be used
          * when the bond's ids already name a profile this build knows.
          * An unknown pad reads its report map every time, as it must. */
-        if (gc && gc->nch > 0 && l->ids_known && profile_find(l->vid, l->pid) != NULL) {
+        if (gc && gc->nch > 0 && gc->nch <= LE_MAX_CHARS && l->ids_known &&
+            profile_find(l->vid, l->pid) != NULL) {
             e->nch = gc->nch;
             e->svc_start = gc->svc_start;
             e->svc_end = gc->svc_end;
