@@ -14,6 +14,20 @@ constexpr std::size_t kMaxBytes = 128;
 std::string failure(const char *operation) {
     return std::string(operation) + ": " + std::strerror(errno);
 }
+// A save interrupted between create and rename (crash, power loss) leaves
+// the temporary behind, and the O_EXCL create then refused every later save,
+// so the setting could never change again. Saves are serialized by the
+// preferences worker, so a leftover temporary belongs to a writer that is
+// gone. Remove it only when it passes the test the preference itself must
+// pass (a regular file without other links), never through a link or FIFO.
+bool remove_stale_temporary(const std::string &temporary) {
+    const int fd = ::open(temporary.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat info{};
+    const bool plain = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink <= 1;
+    ::close(fd);
+    return plain && ::unlink(temporary.c_str()) == 0;
+}
 // Do not follow a link or block on a device/FIFO in an app preference path.
 bool read_preference(const std::string &path, std::string *text,
                      bool *missing, std::string *error) {
@@ -98,8 +112,15 @@ AppPreferenceWrite AppServicePreferences::set_autostart(bool enabled) {
         result.error = failure("inspect preference"); error_ = result.error; return result;
     }
     const std::string temporary = path_ + ".tmp";
-    // A stale/external temporary file is not ours to truncate or delete.
-    const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    // Never truncate a temporary in place or follow a link to one; a
+    // plain leftover from an interrupted save is removed and created anew.
+    int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        if (remove_stale_temporary(temporary))
+            fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        else
+            errno = EEXIST;
+    }
     if (fd < 0) { result.error = failure("create preference temporary"); error_ = result.error; return result; }
     const std::string text = encode(enabled);
     std::size_t written = 0;

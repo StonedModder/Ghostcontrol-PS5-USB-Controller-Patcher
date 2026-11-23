@@ -14,6 +14,20 @@ constexpr std::size_t kMaxBytes = 128;
 std::string failure(const char *operation) {
     return std::string(operation) + ": " + std::strerror(errno);
 }
+// A save interrupted between create and rename (crash, power loss) leaves
+// the temporary behind, and the O_EXCL create then refused every later save,
+// so "Don't show again" could never be saved. The app saves this preference
+// from one place, so a leftover temporary belongs to a writer that is gone.
+// Remove it only when it is a regular file without other links, never
+// through a link or FIFO.
+bool remove_stale_temporary(const std::string &temporary) {
+    const int fd = ::open(temporary.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat info{};
+    const bool plain = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink <= 1;
+    ::close(fd);
+    return plain && ::unlink(temporary.c_str()) == 0;
+}
 bool read_preference(const std::string &path, std::string *text,
                      bool *missing, std::string *error) {
     *missing = false;
@@ -93,7 +107,13 @@ DisclaimerWrite BetaDisclaimerPreference::set_dismissed(bool dismissed) {
         result.error = failure("inspect preference"); error_ = result.error; return result;
     }
     const std::string temporary = path_ + ".tmp";
-    const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        if (remove_stale_temporary(temporary))
+            fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        else
+            errno = EEXIST;
+    }
     if (fd < 0) { result.error = failure("create preference temporary"); error_ = result.error; return result; }
     const std::string text = encode(dismissed);
     std::size_t written = 0;
