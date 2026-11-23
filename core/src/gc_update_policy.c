@@ -18,8 +18,10 @@ static void set_error(char *error, size_t error_size, const char *format, ...)
     va_end(arguments);
 }
 
+/* `prerelease` receives the identifiers after '-' (up to any '+build'), or
+ * NULL for a final release. */
 static int parse_version(const char *value, unsigned output[3],
-                         int *prerelease)
+                         const char **prerelease)
 {
     if (!value || !output || !prerelease)
         return -1;
@@ -38,15 +40,83 @@ static int parse_version(const char *value, unsigned output[3],
         if (part < 2 && *value++ != '.')
             return -1;
     }
-    *prerelease = *value == '-';
-    return *value == '\0' || *value == '-' ? 0 : -1;
+    if (*value == '-' && value[1] && value[1] != '+') {
+        *prerelease = value + 1;
+        return 0;
+    }
+    *prerelease = NULL;
+    return *value == '\0' || *value == '+' ? 0 : -1;
+}
+
+/* Length of the dot-separated identifier at `text`, stopping at '.', '+' or
+ * the end. */
+static size_t identifier_length(const char *text)
+{
+    size_t length = 0;
+    while (text[length] && text[length] != '.' && text[length] != '+')
+        ++length;
+    return length;
+}
+
+static int identifier_is_numeric(const char *text, size_t length)
+{
+    if (!length)
+        return 0;
+    for (size_t i = 0; i < length; ++i)
+        if (text[i] < '0' || text[i] > '9')
+            return 0;
+    return 1;
+}
+
+/* SemVer 2.0.0 section 11.4: identifiers compare left to right; numeric ones
+ * by value, the rest in ASCII order, numeric below alphanumeric, and a shorter
+ * list ranks lower when it is a prefix of the other. */
+static int prerelease_compare(const char *left, const char *right)
+{
+    for (;;) {
+        const int left_end = !*left || *left == '+';
+        const int right_end = !*right || *right == '+';
+        if (left_end || right_end)
+            return left_end == right_end ? 0 : left_end ? -1 : 1;
+        const size_t left_length = identifier_length(left);
+        const size_t right_length = identifier_length(right);
+        const int left_numeric = identifier_is_numeric(left, left_length);
+        const int right_numeric = identifier_is_numeric(right, right_length);
+        int order;
+        if (left_numeric && right_numeric) {
+            size_t a = 0, b = 0;
+            while (a + 1 < left_length && left[a] == '0')
+                ++a;
+            while (b + 1 < right_length && right[b] == '0')
+                ++b;
+            if (left_length - a != right_length - b)
+                order = left_length - a < right_length - b ? -1 : 1;
+            else
+                order = strncmp(left + a, right + b, left_length - a);
+        } else if (left_numeric != right_numeric) {
+            order = left_numeric ? -1 : 1;
+        } else {
+            const size_t shorter = left_length < right_length ? left_length : right_length;
+            order = strncmp(left, right, shorter);
+            if (!order && left_length != right_length)
+                order = left_length < right_length ? -1 : 1;
+        }
+        if (order)
+            return order < 0 ? -1 : 1;
+        left += left_length;
+        right += right_length;
+        if (*left == '.')
+            ++left;
+        if (*right == '.')
+            ++right;
+    }
 }
 
 int gc_update_version_compare(const char *left, const char *right,
                               int *comparison)
 {
     unsigned left_parts[3], right_parts[3];
-    int left_pre, right_pre;
+    const char *left_pre, *right_pre;
     if (!comparison || parse_version(left, left_parts, &left_pre) != 0 ||
         parse_version(right, right_parts, &right_pre) != 0)
         return -1;
@@ -56,8 +126,12 @@ int gc_update_version_compare(const char *left, const char *right,
             return 0;
         }
     }
-    /* Same x.y.z: a final release outranks a prerelease of that version. */
-    *comparison = right_pre - left_pre;
+    /* Same x.y.z: a final release outranks a prerelease of that version, and
+     * two prereleases are ordered by their identifiers (beta < beta.2 < rc). */
+    if (!left_pre || !right_pre)
+        *comparison = (right_pre != NULL) - (left_pre != NULL);
+    else
+        *comparison = prerelease_compare(left_pre, right_pre);
     return 0;
 }
 
