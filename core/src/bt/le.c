@@ -1413,9 +1413,21 @@ static void on_att(host_t *h, link_t *l, const uint8_t *d, int n)
     on_att_request(h, l, d, n);
 }
 
+/* LE signaling codes, Core Vol 3 Part A section 4 (Table 4.2). */
+#define LE_SIG_COMMAND_REJECT    0x01
+#define LE_SIG_DISCONN_RSP       0x07
+#define LE_SIG_CONN_PARAM_RSP    0x13
+#define LE_SIG_LE_CREDIT_REQ     0x14   /* LE Credit Based Connection Request */
+#define LE_SIG_LE_CREDIT_RSP     0x15
+#define LE_SIG_FLOW_CREDIT_IND   0x16   /* Flow Control Credit Indication */
+#define LE_SIG_ECRED_REQ         0x17   /* (Enhanced) Credit Based Connection Request */
+#define LE_SIG_ECRED_RSP         0x18
+#define LE_SIG_ECRED_RECONF_REQ  0x19
+#define LE_SIG_ECRED_RECONF_RSP  0x1A
+
 static void on_le_signaling(host_t *h, link_t *l, const uint8_t *d, int n)
 {
-    uint8_t r[16];
+    uint8_t r[32];
 
     if (n < 4) return;
     if (d[0] == 0x12 && n >= 12) {              /* connection parameter update request */
@@ -1430,22 +1442,50 @@ static void on_le_signaling(host_t *h, link_t *l, const uint8_t *d, int n)
         put16(p + 10, 0);
         put16(p + 12, 0);
         send_cmd(h, OP_LE_CONN_UPDATE, p, 14);
-    } else if (d[0] == 0x16 && n >= 10) {       /* LE Credit Based Connection Request */
-        /* Reject: we do not use credit-based channels (fixed CID_LE_SIG/ATT/SMP only). */
-        r[0] = 0x17;
+    } else if (d[0] == LE_SIG_LE_CREDIT_REQ && n >= 14) {
+        /* We use only the fixed channels (signaling, ATT, SMP), so refuse
+         * every credit-based channel: LE_PSM not supported. */
+        r[0] = LE_SIG_LE_CREDIT_RSP;
         r[1] = d[1];
-        put16(r + 2, 4);
-        put16(r + 4, 0x0000);                   /* no credits */
-        put16(r + 6, 0x0000);                   /* MPS */
-        put16(r + 8, 0x0000);                   /* MTU */
-        put16(r + 10, 0x0000);                  /* CID */
-        put16(r + 12, 0x0001);                  /* result: not supported */
+        put16(r + 2, 10);
+        put16(r + 4, 0x0000);                   /* destination CID */
+        put16(r + 6, 0x0000);                   /* MTU */
+        put16(r + 8, 0x0000);                   /* MPS */
+        put16(r + 10, 0x0000);                  /* initial credits */
+        put16(r + 12, 0x0002);                  /* result: LE_PSM not supported */
         l2_send(h, l, CID_LE_SIG, r, 14);
-        log_line("le pad %s: credit-based connection rejected (not supported)", addr_str(l->addr));
-    } else if (d[0] == 0x18 && n >= 4) {        /* LE Flow Control Credit Ind */
-        /* Peer is adding credits to a channel we do not use; ignore. */
-    } else if (!(d[0] & 1) && d[0] != 0x12) {   /* other requests: rejected */
-        r[0] = 0x01;
+        log_line("le pad %s: credit-based connection refused (not supported)", addr_str(l->addr));
+    } else if (d[0] == LE_SIG_ECRED_REQ && n >= 14) {
+        /* SPSM, MTU, MPS, credits, then 1..5 source CIDs. The response
+         * carries one (zero) destination CID per requested channel. */
+        int i, cids = (n - 12) / 2;
+        if (cids > 5) cids = 5;
+        r[0] = LE_SIG_ECRED_RSP;
+        r[1] = d[1];
+        put16(r + 2, (uint16_t)(8 + 2 * cids));
+        put16(r + 4, 0x0000);                   /* MTU */
+        put16(r + 6, 0x0000);                   /* MPS */
+        put16(r + 8, 0x0000);                   /* initial credits */
+        put16(r + 10, 0x0002);                  /* result: SPSM not supported */
+        for (i = 0; i < cids; i++)
+            put16(r + 12 + 2 * i, 0x0000);
+        l2_send(h, l, CID_LE_SIG, r, 12 + 2 * cids);
+        log_line("le pad %s: enhanced credit-based connection refused (not supported)",
+                 addr_str(l->addr));
+    } else if (d[0] == LE_SIG_ECRED_RECONF_REQ) {
+        r[0] = LE_SIG_ECRED_RECONF_RSP;
+        r[1] = d[1];
+        put16(r + 2, 2);
+        put16(r + 4, 0x0003);                   /* result: a destination CID is invalid */
+        l2_send(h, l, CID_LE_SIG, r, 6);
+    } else if (d[0] == LE_SIG_COMMAND_REJECT || d[0] == LE_SIG_DISCONN_RSP ||
+               d[0] == LE_SIG_CONN_PARAM_RSP || d[0] == LE_SIG_LE_CREDIT_RSP ||
+               d[0] == LE_SIG_FLOW_CREDIT_IND || d[0] == LE_SIG_ECRED_RSP ||
+               d[0] == LE_SIG_ECRED_RECONF_RSP) {
+        /* Responses and indications for requests we never send, or credits
+         * for channels we never open: nothing to answer. */
+    } else if (d[0] != 0x12) {                  /* any other command: rejected */
+        r[0] = LE_SIG_COMMAND_REJECT;
         r[1] = d[1];
         put16(r + 2, 2);
         put16(r + 4, 0);                        /* command not understood */

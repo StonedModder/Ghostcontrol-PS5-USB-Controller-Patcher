@@ -423,6 +423,10 @@ static int boot_setup(void *ctx, const uint8_t *desc, int len,
     generic_ctx *g = ctx;
     (void)desc; (void)len; (void)vid; (void)pid;
     memset(g, 0, sizeof *g);
+    /* Every field below belongs to report ID 1, so the report starts with
+     * that ID byte. Without has_ids, generic_parse matched fields against
+     * report ID 0 and skipped all of them: the fallback never decoded input. */
+    g->has_ids = 1;
     /* Boot protocol: byte 0 = buttons 1-8, bytes 1-2 = X/Y, bytes 3-4 = Rx/Ry. */
     g->button[0].present = 1; g->button[0].rid = 1; g->button[0].off = 0; g->button[0].size = 1;
     g->button[1].present = 1; g->button[1].rid = 1; g->button[1].off = 1; g->button[1].size = 1;
@@ -437,6 +441,9 @@ static int boot_setup(void *ctx, const uint8_t *desc, int len,
     g->axis[AX_Y].present = 1; g->axis[AX_Y].rid = 1; g->axis[AX_Y].off = 16; g->axis[AX_Y].size = 8;
     g->axis[AX_Z].present = 1; g->axis[AX_Z].rid = 1; g->axis[AX_Z].off = 24; g->axis[AX_Z].size = 8;
     g->axis[AX_RX].present = 1; g->axis[AX_RX].rid = 1; g->axis[AX_RX].off = 32; g->axis[AX_RX].size = 8;
+    /* No descriptor gives these axes a logical range, and to_byte reads an
+     * empty range (max <= min) as centred, so set the 8-bit one explicitly. */
+    g->axis[AX_X].max = g->axis[AX_Y].max = g->axis[AX_Z].max = g->axis[AX_RX].max = 255;
     default_mapping(g);
     builtin_map(g, vid, pid);
     ensure_ps(g, vid, pid);

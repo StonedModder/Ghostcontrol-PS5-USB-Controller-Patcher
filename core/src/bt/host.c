@@ -1136,18 +1136,19 @@ static int model_is_dualsense(unsigned vid, unsigned pid)
 }
 
 /* The model a pad announces before any connection: the extended inquiry
- * response's Device ID record, type 0x10 (source 1, vendor 2, product 2,
- * version 2 -- the length byte counts the type as well, so 8). */
+ * response's Device ID record, type 0x10 (vendor ID source 2, vendor 2,
+ * product 2, version 2 -- the length byte counts the type as well, so 9; see
+ * the Device ID profile and BlueZ's eir.c). */
 static int eir_device_id(const unsigned char *eir, int n, unsigned *vid, unsigned *pid)
 {
     int i;
 
     if (!eir) return 0;
     for (i = 0; i + 1 < n && eir[i] > 0 && i + 1 + eir[i] <= n; i += 1 + eir[i]) {
-        if (eir[i + 1] == 0x10 && eir[i] >= 8) {
-            /* length, type, source, vendor (2), product (2), version (2) */
-            *vid = le16(eir + i + 3);
-            *pid = le16(eir + i + 5);
+        if (eir[i + 1] == 0x10 && eir[i] >= 9) {
+            /* length, type, source (2), vendor (2), product (2), version (2) */
+            *vid = le16(eir + i + 4);
+            *pid = le16(eir + i + 6);
             return 1;
         }
     }
