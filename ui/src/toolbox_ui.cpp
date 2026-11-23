@@ -79,15 +79,24 @@ std::size_t count_array_objects(std::string_view json, std::string_view key)
     return count;
 }
 
-/* How many slots report "connected":true. STATUS carries no count of its own,
- * so it is read from the slot objects; the reply's only other "connected" is
- * the wireless bridge, and that one is a number, never true. */
 std::vector<std::string_view> json_array_elements(std::string_view json, std::string_view key);
+
+/* The GhosttoothAPI service lists its own initial-user pad as STATUS slot 0
+ * ("app-pad-0") ahead of the virtual pads, which it numbers from 1 and names
+ * "vpad-<n>". That entry is this app's controller, not a virtual slot. */
+bool is_app_pad_slot(std::string_view object)
+{
+    return json_value(object, "device_path").substr(0, 7) == "app-pad";
+}
+
+/* How many virtual slots report "connected":true. STATUS carries no count of
+ * its own, so it is read from the slot objects; the reply's only other
+ * "connected" is the wireless bridge, and that one is a number, never true. */
 std::size_t count_connected_slots(std::string_view status_json)
 {
     std::size_t count = 0;
     for (const auto object : json_array_elements(status_json, "slots"))
-        if (json_raw_value(object, "connected") == "true") ++count;
+        if (!is_app_pad_slot(object) && json_raw_value(object, "connected") == "true") ++count;
     return count;
 }
 
@@ -221,10 +230,24 @@ std::string_view slot_object(std::string_view status_json, int index)
     return {};
 }
 
+/* The STATUS entry behind "Virtual output <index + 1>". The GhosttoothAPI
+ * service names its virtual pads "vpad-<index>" but numbers them from slot 1,
+ * after its own app pad in slot 0, so a lookup by slot number alone showed the
+ * app pad as virtual output 1 and never showed vpad-3. A service that does not
+ * name its slots that way keeps the 0-based slot lookup. */
+std::string_view virtual_slot_object(std::string_view status_json, int index)
+{
+    const std::string path = "vpad-" + std::to_string(index);
+    for (const auto object : json_array_elements(status_json, "slots"))
+        if (json_value(object, "device_path") == path) return object;
+    const std::string_view object = slot_object(status_json, index);
+    return is_app_pad_slot(object) ? std::string_view{} : object;
+}
+
 /* One line for a slot row: what is there, and whether it has a user. */
 std::string slot_summary(std::string_view status_json, int index)
 {
-    const std::string_view object = slot_object(status_json, index);
+    const std::string_view object = virtual_slot_object(status_json, index);
     if (object.empty())
         return "-";
     if (json_value(object, "connected") != "true")

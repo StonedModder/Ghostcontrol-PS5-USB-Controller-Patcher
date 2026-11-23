@@ -300,8 +300,10 @@ int main()
         /* The screen asks; the loop plays. Keeping playback out of the screen
          * means the screen stays drawable more than once per frame. */
         for (const hui::audio::CueEvent &event : feedback.cues)
+        {
             sounds.play(mixer, hui::audio::SoundSet::glass, event);
             music.duck();
+        }
         // NativePadBridge is the sole output scheduler. UI feedback must not
         // overwrite a requested test or neutralize it through kit Pad::tick().
 
