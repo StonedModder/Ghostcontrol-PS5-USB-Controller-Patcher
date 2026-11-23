@@ -11,6 +11,7 @@
  * A repeated identical report is accepted only after a quiet gap, so held
  * reports cannot confirm themselves. */
 #define GC_SETUP_GUIDED_CONFIRM_GAP_MS 250u
+#define GC_SETUP_BASELINE_MAX 256u
 typedef struct {
     GcProfile profile;
     char path[32], message[192];
@@ -42,8 +43,10 @@ typedef struct {
     /* First report seen after arming: wake/release are measured as a real
      * change from this baseline, so a descriptor that decodes to nothing can
      * still be woken and released. The dead-band keeps keep-alive stick jitter
-     * from reading as a held button. */
-    uint8_t wake_baseline[32];
+     * from reading as a held button. Sized for a whole service report
+     * (GC_SERVICE_REPORT_MAX): a field-derived digital window can sit past
+     * byte 32 of a long report. */
+    uint8_t wake_baseline[GC_SETUP_BASELINE_MAX];
     uint16_t wake_baseline_len;
     int wake_baseline_valid;
     /* Set once a report during the wake handshake shows a decoded control:
@@ -68,6 +71,15 @@ typedef struct {
     int raw_valid;
     int raw_learn;
 } GcSetup;
+
+/* Bytes of wake_baseline that hold the baseline. wake_baseline_len records
+ * the full size of the report the baseline came from (a size change re-arms
+ * it), which can exceed what was copied, so every read is bounded by this. */
+static inline size_t gc_setup_baseline_length(const GcSetup *s)
+{
+    return s->wake_baseline_len < sizeof s->wake_baseline ? s->wake_baseline_len
+                                                          : sizeof s->wake_baseline;
+}
 /* Caller serializes access; input is the parsed state BEFORE remapping. */
 void gc_setup_begin(GcSetup *setup, const GcProfile *profile, const char *path);
 /* True when another Begin refers to the current physical/profile draft. */
