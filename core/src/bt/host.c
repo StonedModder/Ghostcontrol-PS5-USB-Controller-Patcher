@@ -362,8 +362,13 @@ void gatt_cache_load(host_t *h)
         return;
     }
     while (h->ngatt_cache < GATT_CACHE_MAX &&
-           fread(&h->gatt_cache[h->ngatt_cache], 1, sizeof(gatt_cache_rec), f) == sizeof(gatt_cache_rec))
-        h->ngatt_cache++;
+           fread(&h->gatt_cache[h->ngatt_cache], 1, sizeof(gatt_cache_rec), f) == sizeof(gatt_cache_rec)) {
+        /* nch comes from the file (up to 255), but a record and a link hold
+         * LE_MAX_CHARS characteristics; a cache hit copies nch of them. Drop
+         * a record that claims more (a stale layout or a damaged file). */
+        if (h->gatt_cache[h->ngatt_cache].nch <= LE_MAX_CHARS)
+            h->ngatt_cache++;
+    }
     fclose(f);
     if (h->ngatt_cache > 0)
         log_line("gatt cache: %d pad(s)", h->ngatt_cache);
@@ -1464,7 +1469,13 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
             break;
         }
         log_line("pad %s: authentication failed (status %#04x)", addr_str(l->addr), ev[2]);
-        if (!l->pairing) db_forget(h, l->addr);     /* the pad lost its key */
+        /* Forget the bond only when the pad says it has no key (0x06, PIN
+         * or Key Missing), as the LE path does. Timeouts (0x08, 0x22),
+         * terminations and LMP collisions (0x23, 0x2A, which the pad's own
+         * authentication can cause) are transient, and forgetting on them
+         * dropped a good bond. A pad whose key really is gone is paired
+         * again through pair_with(), which forgets the old key itself. */
+        if (!l->pairing && ev[2] == 0x06) db_forget(h, l->addr);
         link_disconnect(h, l, "authentication failed");
         break;
 
@@ -1577,6 +1588,13 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
 
     case 0x16:  /* PIN Code Request: legacy pairing */
         if (len < 8 || !(l = link_by_addr(h, ev + 2))) break;
+        if (!l->pairing) {
+            /* See IO Capability Request: no pairing on a reconnect. */
+            log_line("pad %s: PIN requested on a reconnect; refused (pair it again to re-pair)",
+                     addr_str(l->addr));
+            send_cmd(h, OP_PIN_CODE_NEG_REPLY, ev + 2, 6);
+            break;
+        }
         memset(p, 0, sizeof p);
         memcpy(p, ev + 2, 6);
         /* Nintendo's Wii pads paired with their Sync button take the host's
@@ -1611,6 +1629,13 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
 
     case 0x18:  /* Link Key Notification: addr, key, type */
         if (len < 25 || !(l = link_by_addr(h, ev + 2))) break;
+        /* A new key is only taken from a pairing we started. The one
+         * exception is a changed combination key (type 0x06), which needs a
+         * link already authenticated with the stored key. */
+        if (!l->pairing && !(ev[24] == 0x06 && l->auth_ok)) {
+            log_line("pad %s: link key offered on a reconnect; not stored", addr_str(ev + 2));
+            break;
+        }
         {
             db_rec *r = db_put(h, ev + 2);
             memcpy(r->key, ev + 8, 16);
@@ -1621,8 +1646,23 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
         break;
 
     case 0x31:  /* IO Capability Request */
-        if (len < 8 || !link_by_addr(h, ev + 2)) break;
+        if (len < 8 || !(l = link_by_addr(h, ev + 2))) break;
         memcpy(p, ev + 2, 6);
+        if (!l->pairing) {
+            /* A reconnect is accepted only because its address matches a
+             * stored bond, so it must authenticate with that bond's key. If
+             * it tries to pair instead, answering NoInputNoOutput and
+             * auto-confirming (Just Works) would hand the bond, and that
+             * pad's slot, to any device using the address, overwriting the
+             * real pad's key. Refuse, as BlueZ does by default
+             * (JustWorksRepairing=never); a pad that lost its key is paired
+             * again from the pairing window, which forgets the old key. */
+            log_line("pad %s: pairing attempted on a reconnect; refused (pair it again to re-pair)",
+                     addr_str(l->addr));
+            p[6] = 0x18;                /* Pairing Not Allowed */
+            send_cmd(h, OP_IO_CAP_NEG_REPLY, p, 7);
+            break;
+        }
         p[6] = 0x03;                    /* NoInputNoOutput */
         p[7] = 0x00;                    /* no OOB data */
         p[8] = 0x04;                    /* general bonding, no MITM */
@@ -1630,8 +1670,8 @@ static void on_event(host_t *h, const unsigned char *ev, int len)
         break;
 
     case 0x33:  /* User Confirmation Request */
-        if (len < 8 || !link_by_addr(h, ev + 2)) break;
-        send_cmd(h, OP_USER_CONFIRM_REPLY, ev + 2, 6);
+        if (len < 8 || !(l = link_by_addr(h, ev + 2))) break;
+        send_cmd(h, l->pairing ? OP_USER_CONFIRM_REPLY : OP_USER_CONFIRM_NEG_REPLY, ev + 2, 6);
         break;
 
     default:
