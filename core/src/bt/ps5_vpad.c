@@ -2,6 +2,7 @@
 #include "host.h"
 #include "log.h"
 #include "util.h"
+#include "vpad_rumble_rs.h"
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -77,6 +78,7 @@ int32_t scePadReadState(int32_t handle, ScePadData *data);
 int32_t scePadVirtualDeviceAddDevice(void *param, int32_t deviceType);
 int32_t scePadVirtualDeviceInsertData(int32_t handle, const void *data);
 int32_t scePadVirtualDeviceDeleteDevice(int32_t handle);
+int32_t scePadVirtualDeviceGetRemoteSetting(int32_t handle, void *data, uint64_t size);
 
 /* From the payload SDK (ps5/kernel.h). */
 uint64_t kernel_get_ucred_authid(pid_t pid);
@@ -548,6 +550,39 @@ void vpad_poll(long now)
 int vpad_live(int slot)
 {
     return slot >= 0 && slot < HOST_MAX_PADS && g_slot[slot].st == VP_READY;
+}
+
+/* ---- game rumble read-back --------------------------------------------------
+ *
+ * When a game rumbles our virtual DualSense it calls scePadSetVibration on the
+ * console side; the system records the request in the device's "remote
+ * setting", which this process reads back locally with
+ * scePadVirtualDeviceGetRemoteSetting -- no game-memory hooking. vpad_rumble()
+ * turns that buffer into the two motor levels the BT output path drives onto a
+ * physical third-party controller.
+ *
+ * The buffer layout and the record/active-bit decode -- validated against real
+ * PS5 hardware captures -- live in vpad_rumble_rs.h so they can be unit-tested
+ * on a host (core/tests/rumble). Classic motors only; DualSense haptics are a
+ * separate channel and are not captured here.
+ */
+#define VPAD_RS_BUF 256
+
+int vpad_rumble(int slot, uint8_t *strong, uint8_t *weak)
+{
+    uint8_t buf[VPAD_RS_BUF];
+
+    if (slot < 0 || slot >= HOST_MAX_PADS || !strong || !weak)
+        return 0;
+    if (!vpad_live(slot))
+        return 0;
+    memset(buf, 0, sizeof buf);
+    if (scePadVirtualDeviceGetRemoteSetting(g_slot[slot].handle, buf, sizeof buf) != 0)
+        return 0;
+    /* Release is each record's active bit, read live every poll: a steady
+     * effect is held and a stopped one drops to 0 with no timeout, and only
+     * active motor records are read so lightbar/flag bytes never register. */
+    return vpad_rs_decode(buf, sizeof buf, strong, weak);
 }
 
 void vpad_update(int slot, const pad_state *st)

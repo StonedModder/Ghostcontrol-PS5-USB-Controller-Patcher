@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 #define GC_UPDATE_API \
-    "https:
+    "https://api.github.com/repos/StonedModder/Ghostcontrol-PS5-USB-Controller-Patcher"
 #define GC_UPDATE_USER_AGENT "Ghostcontrol-Toolbox/1.0"
 #define GC_UPDATE_JSON_LIMIT (2u * 1024u * 1024u)
 

@@ -40,6 +40,13 @@ int  vpad_live(int slot);
 void vpad_update(int slot, const pad_state *st);
 void vpad_remove(int slot);
 
+/* Reads the game's requested rumble for `slot` back from the virtual
+ * DualSense's remote setting (no game-memory hooking) into *strong and *weak
+ * (0-255, both driven together). Returns 1 when a reading is available, 0 when
+ * the slot is not live or the read failed. See ps5_vpad.c for the per-title
+ * offset and staleness handling. */
+int  vpad_rumble(int slot, uint8_t *strong, uint8_t *weak);
+
 /* The user's own DualSense, read only. Returns 0 if it cannot be read;
  * vpad_physical_error() then says why (a libScePad error, or 0xFFFF0001 not
  * ready, 0xFFFF0002 no pad connected, 0xFFFF0003 the system has the input, 0xFFFF0004
