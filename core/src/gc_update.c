@@ -6,9 +6,11 @@
 #include <json-c/json.h>
 #include <openssl/evp.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,14 +92,23 @@ static int ensure_ca_bundle(const char *root, char path[512],
     if (count < 0 || (size_t)count >= sizeof(temporary))
         return -1;
     int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0 || write_all(fd, gc_ca_bundle_start, embedded_size) != 0 ||
-        fsync(fd) != 0 || close(fd) != 0 || rename(temporary, path) != 0) {
-        int saved = errno;
-        if (fd >= 0)
-            close(fd);
+    int ok = fd >= 0 && write_all(fd, gc_ca_bundle_start, embedded_size) == 0 &&
+             fsync(fd) == 0;
+    int saved = errno;
+    /* Close exactly once: a second close() after a failed rename() could
+     * close a descriptor another thread has just been given. */
+    if (fd >= 0 && close(fd) != 0 && ok) {
+        ok = 0;
+        saved = errno;
+    }
+    if (ok && rename(temporary, path) != 0) {
+        ok = 0;
+        saved = errno;
+    }
+    if (!ok) {
         unlink(temporary);
+        set_error(error, error_size, "cannot install CA bundle: %s", strerror(saved));
         errno = saved;
-        set_error(error, error_size, "cannot install CA bundle: %s", strerror(errno));
         return -1;
     }
     return 0;
@@ -267,6 +278,12 @@ int gc_update_check(const char *current_version, int include_prereleases,
         free(buffer.data);
         return -1;
     }
+    /* An empty 200 body never reaches memory_write, so nothing was allocated;
+     * json_tokener_parse(NULL) would dereference it. */
+    if (!buffer.data) {
+        set_error(error, error_size, "GitHub returned an empty response");
+        return -1;
+    }
     json_object *root = json_tokener_parse((const char *)buffer.data);
     free(buffer.data);
     if (!root || !json_object_is_type(root, json_type_array)) {
@@ -275,14 +292,38 @@ int gc_update_check(const char *current_version, int include_prereleases,
         set_error(error, error_size, "GitHub returned invalid JSON");
         return -1;
     }
-    int result = -1;
+    /* Offer the highest eligible version, not the first one the API lists:
+     * release order follows creation time, so a later hotfix for an older
+     * line would otherwise hide a newer release. A tag that is not semantic
+     * versioning is skipped rather than failing the whole check. */
+    int found = 0, unversioned = 0;
     size_t count = json_object_array_length(root);
-    for (size_t i = 0; i < count && result != 0; ++i)
-        result = release_info(json_object_array_get_idx(root, i),
-                              include_prereleases, info, error, error_size);
+    for (size_t i = 0; i < count; ++i) {
+        GcUpdateInfo candidate;
+        if (release_info(json_object_array_get_idx(root, i), include_prereleases,
+                         &candidate, error, error_size) != 0)
+            continue;
+        /* Against the best so far; the first candidate is compared with
+         * itself, which only checks that its tag parses. */
+        int order = 0;
+        if (gc_update_version_compare(candidate.tag, found ? info->tag : candidate.tag,
+                                      &order) != 0) {
+            unversioned = 1;
+            continue;
+        }
+        if (!found || order > 0) {
+            *info = candidate;
+            found = 1;
+        }
+    }
     json_object_put(root);
-    if (result != 0)
+    if (!found) {
+        if (unversioned)
+            set_error(error, error_size, "release tag is not semantic versioning");
         return -1;
+    }
+    if (error && error_size)
+        error[0] = '\0';
     int comparison = 0;
     if (gc_update_version_compare(info->tag, current_version, &comparison) != 0) {
         set_error(error, error_size, "release tag is not semantic versioning");
@@ -363,16 +404,53 @@ static int write_metadata(const char *root, const GcUpdateInfo *info)
                           "schema=1\ntag=%s\nasset=%s\nsize=%llu\nsha256=%s\n",
                           info->tag, info->asset_name,
                           (unsigned long long)info->size, info->sha256);
+    if (length < 0 || (size_t)length >= sizeof(text))
+        return -1;
     int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (length < 0 || (size_t)length >= sizeof(text) || fd < 0 ||
-        write_all(fd, text, (size_t)length) != 0 || fsync(fd) != 0 ||
-        close(fd) != 0 || rename(temporary, path) != 0) {
-        if (fd >= 0)
-            close(fd);
+    int ok = fd >= 0 && write_all(fd, text, (size_t)length) == 0 &&
+             fsync(fd) == 0;
+    /* Close exactly once, whatever failed (see ensure_ca_bundle). */
+    if (fd >= 0 && close(fd) != 0)
+        ok = 0;
+    if (!ok || rename(temporary, path) != 0) {
         unlink(temporary);
         return -1;
     }
     return 0;
+}
+
+/* A download interrupted by a crash or power loss leaves its staging file
+ * (up to GC_UPDATE_SIZE_MAX bytes) behind, named for the pid that wrote it.
+ * Remove those whose process no longer exists; a live writer, including this
+ * process, keeps its file. */
+static void remove_stale_downloads(const char *updates)
+{
+    static const char prefix[] = "Ghostcontrol-Toolbox-app.zip.download.";
+    DIR *directory = opendir(updates);
+    if (!directory)
+        return;
+    const pid_t self = getpid();
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strncmp(entry->d_name, prefix, sizeof(prefix) - 1) != 0)
+            continue;
+        const char *digits = entry->d_name + sizeof(prefix) - 1;
+        char *end = NULL;
+        errno = 0;
+        long pid = strtol(digits, &end, 10);
+        if (!*digits || *end || errno || pid <= 0 || (pid_t)pid == self)
+            continue;
+        if (kill((pid_t)pid, 0) == 0 || errno != ESRCH)
+            continue;
+        char path[640];
+        struct stat info;
+        if (snprintf(path, sizeof(path), "%s/%s", updates, entry->d_name) >=
+                (int)sizeof(path) ||
+            lstat(path, &info) != 0 || !S_ISREG(info.st_mode))
+            continue;
+        (void)unlink(path);
+    }
+    closedir(directory);
 }
 
 int gc_update_download(const char *root, const GcUpdateInfo *info,
@@ -394,6 +472,7 @@ int gc_update_download(const char *root, const GcUpdateInfo *info,
                  (int)sizeof(previous))
         return -1;
     (void)mkdir(updates, 0755);
+    remove_stale_downloads(updates);
     int fd = open(staged, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
         set_error(error, error_size, "cannot create update staging file: %s",
@@ -405,6 +484,13 @@ int gc_update_download(const char *root, const GcUpdateInfo *info,
     if (!curl) {
         close(fd); unlink(staged); return -1;
     }
+    /* curl_create's 90 s CURLOPT_TIMEOUT covers the whole transfer: right for
+     * the release list, but a ~40 MB bundle cannot finish in 90 s on a link
+     * slower than ~3.6 Mbit/s, so every attempt failed there. Abort on a
+     * stalled transfer instead, under a generous overall cap. */
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 1800L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 4096L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &file);
     curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)info->size);
