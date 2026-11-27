@@ -803,10 +803,11 @@ static void bond_save(host_t *h, link_t *l)
         d->vid = l->vid;
         d->pid = l->pid;
     }
-    db_save(h);
+    const int saved = db_save(h);
     e->bonded = 1;
     e->smp = SMP_DONE;
-    log_line("le pad %s: paired (%s), keys stored", addr_str(l->addr), e->sc ? "Secure Connections" : "legacy");
+    log_line("le pad %s: paired (%s), %s", addr_str(l->addr), e->sc ? "Secure Connections" : "legacy",
+             saved ? "keys stored" : "keys only in memory; reconnect after restart requires pairing");
 }
 
 static void smp_start(host_t *h, link_t *l)
