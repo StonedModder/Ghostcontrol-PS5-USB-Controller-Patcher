@@ -430,8 +430,21 @@ static GcAudioSettingsWrite save_locked(const char *root, const char *address,
         return result;
     }
     snprintf(temporary, sizeof(temporary), "%s.tmp", path);
-    /* A stale or foreign temporary is not ours to truncate or delete. */
-    const int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    /* A temporary is never truncated in place or followed through a link.
+     * Every writer creates it under the exclusive settings lock held here,
+     * so one that already exists was left by a writer that died between
+     * create and rename (crash, power loss); refusing it made every later
+     * save for this headset fail. Replace it when it is a plain single-link
+     * file, and refuse anything else as before. */
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        struct stat stale;
+        if (lstat(temporary, &stale) == 0 && S_ISREG(stale.st_mode) && stale.st_nlink == 1 &&
+            unlink(temporary) == 0)
+            fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        else
+            errno = EEXIST;
+    }
     if (fd < 0) {
         set_error(result.error, sizeof(result.error), "audio settings temporary unavailable: %s",
                   strerror(errno));
