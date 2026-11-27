@@ -56,9 +56,22 @@ static void publish_status(GcWirelessState *value, const char *message)
     gc_state_set_wireless(service_state, value);
 }
 
+static void stop_source_rumble(void)
+{
+    for (unsigned slot = 0; slot < source.source_count; ++slot)
+        (void)gc_ds4_source_set_vibration(&source, slot, 0, 0);
+}
+
+static int remove_game(void)
+{
+    int result = gc_ds4_game_remove(&game);
+    stop_source_rumble();
+    return result;
+}
+
 static int stop_targets(void)
 {
-    int game_result = gc_ds4_game_remove(&game);
+    int game_result = remove_game();
     int source_result = gc_ds4_source_stop(&source);
     return game_result || source_result ? -1 : 0;
 }
@@ -70,13 +83,39 @@ static int update_sources(const GcDs4SourceSnapshot *snapshot)
         changed = memcmp(&source.sources[i], &snapshot->frames[i].source,
                           sizeof(source.sources[i])) != 0;
     if (changed) {
-        if (gc_ds4_game_remove(&game)) return -1;
+        if (remove_game()) return -1;
         source.source_count = snapshot->source_count;
         memset(source.sources, 0, sizeof(source.sources));
         for (unsigned i = 0; i < source.source_count; ++i)
             source.sources[i] = snapshot->frames[i].source;
     }
     return changed;
+}
+
+static void forward_game_rumble(void)
+{
+    static uint64_t retry_after[GC_DS4_MAX_ROUTES];
+    if (game.state != GC_DS4_GAME_LIVE) return;
+    uint64_t now = now_ns();
+    for (unsigned route = 0; route < game.route_count; ++route) {
+        if (now < retry_after[route]) continue;
+        uint32_t sequence = 0;
+        uint8_t large = 0, small = 0;
+        if (gc_ds4_game_rumble(&game, route, &sequence, &large, &small) ||
+            !sequence || sequence == game.rumble_sequences[route]) continue;
+        unsigned source_slot = game.routes[route].source_slot;
+        if (gc_ds4_source_set_vibration(&source, source_slot, large, small)) {
+            ghostpad_status_log("[GC DS4] rumble relay failed route=%u source=%u seq=%u\n",
+                route, source_slot, sequence);
+            retry_after[route] = now + UINT64_C(100000000);
+            continue;
+        }
+        retry_after[route] = 0;
+        /* Acknowledge only delivered values; transient errors must not lose
+         * a stop command. Avoid attaching again after successful delivery.
+         * A later game change, including zero to stop rumble, gets a new seq. */
+        game.rumble_sequences[route] = sequence;
+    }
 }
 
 static void *bridge_worker(void *unused)
@@ -112,6 +151,7 @@ static void *bridge_worker(void *unused)
             int sleeping = suspend_pending(info_flag, system_flag);
             if (sleeping && !suspended) {
                 (void)gc_ds4_game_quiesce(&game);
+                stop_source_rumble();
                 (void)gc_ds4_source_request_stop(&source);
                 suspended = 1; source_live = 0;
                 message = "Suspended";
@@ -123,7 +163,10 @@ static void *bridge_worker(void *unused)
             }
             if (config_store)
                 (void)gc_config_snapshot(config_store, &runtime, &config_generation);
+            int game_was_live = game.state == GC_DS4_GAME_LIVE;
             gc_ds4_game_observe_exit(&game);
+            if (game_was_live && game.state != GC_DS4_GAME_LIVE)
+                stop_source_rumble();
             if (source_live && gc_ds4_source_heartbeat(&source)) {
                 (void)stop_targets(); source_live = 0;
                 message = "Wireless reader heartbeat failed; recovering";
@@ -162,7 +205,7 @@ static void *bridge_worker(void *unused)
             }
             if (source_live && source.source_count && game.state != GC_DS4_GAME_LIVE) {
                 if (game.state == GC_DS4_GAME_RETAINED_QUARANTINED)
-                    (void)gc_ds4_game_remove(&game);
+                    (void)remove_game();
                 if (!gc_ds4_game_install(&game, &source)) message = "Bridge installed; waiting for game input";
                 else message = game.state == GC_DS4_GAME_RETAINED_QUARANTINED
                     ? "Game cleanup pending; restart the game" : "Waiting for a compatible game and exact pad route";
@@ -189,11 +232,12 @@ static void *bridge_worker(void *unused)
                         gc_profile_apply(&profiles[slot], &snapshot.frames[slot].data);
                     if (game.state == GC_DS4_GAME_LIVE) {
                         if (gc_ds4_game_publish(&game, &snapshot)) {
-                            (void)gc_ds4_game_remove(&game);
+                            (void)remove_game();
                             message = "Game bridge publication failed; retrying";
                         } else ++health.publications;
                     }
                 }
+                forward_game_rumble();
             } else if (now_ns() > last_frame + UINT64_C(250000000)) {
                 (void)stop_targets(); source_live = 0;
                 message = "Wireless reader stalled; recovering";
@@ -208,12 +252,12 @@ static void *bridge_worker(void *unused)
             health.game_pid = game.pid;
             GcDs4GameStatus target;
             if (game.state == GC_DS4_GAME_LIVE && gc_ds4_game_validate(&game, &source)) {
-                (void)gc_ds4_game_remove(&game);
+                (void)remove_game();
                 message = "Game pad ownership changed; refreshing routes";
             }
             if (game.state == GC_DS4_GAME_LIVE && !gc_ds4_game_status(&game, &target)) {
                 uint64_t calls = 0;
-                for (unsigned kind = 0; kind < GC_DS4_LIBPAD_SYMBOLS; ++kind) calls += target.calls[kind];
+                for (unsigned kind = 0; kind < GC_DS4_GAME_LIBPAD_SYMBOLS; ++kind) calls += target.calls[kind];
                 if (calls > health.gateway_calls) message = "Wireless DS4 input active";
                 health.gateway_calls = calls;
                 health.lease_expirations = target.lease_expirations;

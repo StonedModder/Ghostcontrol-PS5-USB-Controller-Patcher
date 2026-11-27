@@ -26,6 +26,8 @@ typedef struct {
     int numbered;
     unsigned axes;
     unsigned features;
+    /* Device-specific default buttons; original HID usages stay unchanged. */
+    int ps3_gh_guitar;
 } GcHidLayout;
 
 typedef struct {
@@ -42,6 +44,7 @@ typedef struct {
 
 /* Accept gamepad/joystick application collections, never keyboard/mouse data. */
 int gc_hid_parse_descriptor(const uint8_t *data, size_t size, GcHidLayout *layout);
+void gc_hid_set_device(GcHidLayout *layout, uint16_t vid, uint16_t pid);
 int gc_hid_input(const GcHidLayout *layout, const uint8_t *data, size_t size,
                  ScePadData *pad);
 int gc_hid_input_profile(const GcHidLayout *layout, const uint8_t *data,
