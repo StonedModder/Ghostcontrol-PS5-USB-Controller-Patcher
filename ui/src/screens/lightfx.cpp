@@ -20,7 +20,7 @@ Section build_screen_lightfx() {
          .overlay_unit=" ms", .overlay_command="RUNTIME_SET", .overlay_arguments={"dualsense_fx_period_ms={value}"}},
         {.label="Test rumble", .value="", .note="Choose a strength for a short test, even with the lightbar off.",
          .state=RowState::action, .overlay=OverlayKind::range,
-         .overlay_min=0, .overlay_max=255, .overlay_step=1, .overlay_value=64,
+         .overlay_min=1, .overlay_max=255, .overlay_step=1, .overlay_value=64,
          .overlay_command="DUALSENSE_RUMBLE", .overlay_arguments={"{value}|{value}|400|100|1"}},
         {.label="Stop rumble", .value="", .note="Stop the rumble test without changing the lightbar.",
          .state=RowState::action, .command="DUALSENSE_RUMBLE_STOP"},
