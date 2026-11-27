@@ -472,14 +472,38 @@ void gc_setup_tick(GcSetup *s, uint64_t now_ms)
              "No control received. Check controller mode, then try again.");
 }
 
+/* The raw source behind one learned bit. With a field-derived span, the bit
+ * was measured in the window that gc_rawmap_window opens at raw_span_offset
+ * (bit i is byte raw_span_offset + i / 8), so the source is built there; the
+ * generic heuristic's digital_range() starts at byte 0, 2 or 4 instead and
+ * would save a different byte, or refuse the bit. */
+static int raw_source_for_pattern(const GcSetup *s, uint32_t pattern, GcHidSource *source)
+{
+    if (!s->raw_span_mask)
+        return gc_rawmap_source_from_mask(s->raw_report, s->raw_len, pattern, source);
+    if (!pattern || (pattern & (pattern - 1)) || !(pattern & s->raw_span_mask))
+        return -1;
+    const unsigned index = (unsigned)__builtin_ctz(pattern);
+    const unsigned byte = s->raw_span_offset + index / 8u;
+    if (byte * 8u + 7u > UINT16_MAX)
+        return -1;
+    memset(source, 0, sizeof(*source));
+    source->offset = (uint16_t)(byte * 8u + index % 8u);
+    source->bits = 1;
+    source->report = GC_RAWMAP_REPORT;
+    source->page = GC_RAWMAP_PAGE;
+    source->minimum = 0;
+    source->maximum = 1;
+    return 0;
+}
+
 static int commit_raw_pattern(GcSetup *s, uint32_t pattern)
 {
     GcHidSource source;
     int other;
     if (!s->raw_learn || !s->raw_valid)
         return 0;
-    if (gc_rawmap_source_from_mask(s->raw_report, s->raw_len, pattern,
-                                   &source) != 0)
+    if (raw_source_for_pattern(s, pattern, &source) != 0)
         return 0;
     for (other = 0; other < GC_BUTTON_INPUT15; ++other) {
         const GcHidButtonBinding *binding = &s->profile.hid_buttons[other];
@@ -503,9 +527,7 @@ static int commit_raw_pattern(GcSetup *s, uint32_t pattern)
 static int raw_pattern_owner(const GcSetup *s, uint32_t pattern)
 {
     GcHidSource source;
-    if (!s->raw_valid ||
-        gc_rawmap_source_from_mask(s->raw_report, s->raw_len, pattern,
-                                   &source) != 0)
+    if (!s->raw_valid || raw_source_for_pattern(s, pattern, &source) != 0)
         return -1;
     for (int other = 0; other < GC_BUTTON_INPUT15; ++other) {
         const GcHidButtonBinding *binding = &s->profile.hid_buttons[other];
@@ -986,7 +1008,7 @@ int gc_setup_feed_raw(GcSetup *s, const char *path,
             gc_rawmap_window(report, report_size, s->raw_span_offset) & s->raw_span_mask;
         const uint32_t base_bits =
             (s->wake_baseline_valid && s->wake_baseline_len)
-                ? gc_rawmap_window(s->wake_baseline, s->wake_baseline_len,
+                ? gc_rawmap_window(s->wake_baseline, gc_setup_baseline_length(s),
                                    s->raw_span_offset) & s->raw_span_mask
                 : 0;
         bits = now_bits ^ base_bits;
@@ -996,7 +1018,7 @@ int gc_setup_feed_raw(GcSetup *s, const char *path,
          * neutral report releases instead of latching: without this the wizard
          * restarts its 3-press confirmation on every press (1/3 forever). */
         if (s->wake_baseline_valid && s->wake_baseline_len)
-            bits &= ~gc_rawmap_digital_mask(s->wake_baseline, s->wake_baseline_len);
+            bits &= ~gc_rawmap_digital_mask(s->wake_baseline, gc_setup_baseline_length(s));
     }
     feed_buttons(s, bits, now_ms);
     s->neutral = !bits;

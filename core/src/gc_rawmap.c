@@ -121,6 +121,11 @@ void gc_rawmap_apply(const GcProfile *profile, const uint8_t *report,
     uint32_t replaced = 0;
     if (!profile || !report || !pad)
         return;
+    /* xusb_decoder_bit names what the XUSB decoder made of a byte 2/3 bit.
+     * On any other report those bytes mean something else, and clearing by
+     * that table removed unrelated decoded buttons (byte 2 bit 0 took D-pad
+     * Up, byte 3 bit 4 took Cross) on every report. */
+    const int xusb = gc_rawmap_is_xusb(report, length);
     for (target = 0; target < GC_BUTTON_INPUT15; ++target) {
         const GcHidButtonBinding *binding = &profile->hid_buttons[target];
         unsigned byte, shift;
@@ -130,7 +135,8 @@ void gc_rawmap_apply(const GcProfile *profile, const uint8_t *report,
         replaced |= gc_button_mask((GcButton)target);
         byte = binding->source.offset / 8u;
         shift = binding->source.offset % 8u;
-        pad->buttons &= ~xusb_decoder_bit(byte, shift);
+        if (xusb)
+            pad->buttons &= ~xusb_decoder_bit(byte, shift);
     }
     if (!replaced)
         return;

@@ -300,7 +300,7 @@ static int pad_fresh(uint64_t now)
                         const uint32_t win = gc_rawmap_window(raw, raw_length, span);
                         const uint32_t base = feat_setup.raw_len
                             ? gc_rawmap_window(feat_setup.wake_baseline,
-                                               feat_setup.wake_baseline_len, span) : 0;
+                                               gc_setup_baseline_length(&feat_setup), span) : 0;
                         log_line("setup raw len=%zu %02x%02x%02x%02x%02x%02x%02x%02x"
                                  " win=%08x base=%08x noise=%08x bits=%08x"
                                  " span=%u/%08x target=%d bits2=%08x",
